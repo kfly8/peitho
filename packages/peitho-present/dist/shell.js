@@ -487,6 +487,8 @@ function createClickNavigationGuard(options) {
     shouldIgnoreClick(event) {
       const start = clickStart;
       clickStart = null;
+      const origin = event.composedPath()[0];
+      if (origin instanceof Element && origin.closest("a") !== null) return true;
       if (hasNonCollapsedSelection(win)) return true;
       if (start === null) return false;
       return Math.hypot(event.clientX - start.x, event.clientY - start.y) > moveThresholdPx;

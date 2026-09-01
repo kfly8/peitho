@@ -188,6 +188,52 @@ it("clicks in the left viewport quarter request prev and other canvas clicks req
   expect(requests).toEqual([{ to: "prev" }, { to: "next" }, { to: "next" }]);
 });
 
+it("ignores clicks on links and their descendants while plain content still navigates", () => {
+  const root = document.createElement("main");
+  const anchor = document.createElement("a");
+  const nested = document.createElement("span");
+  const plain = document.createElement("span");
+  const requests: unknown[] = [];
+  anchor.href = "https://example.com/";
+  anchor.target = "_blank";
+  anchor.appendChild(nested);
+  root.append(anchor, plain);
+  mockSelection(true);
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installCanvasClickNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  anchor.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 900 }));
+  nested.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 900 }));
+  plain.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 900 }));
+
+  expect(requests).toEqual([{ to: "next" }]);
+});
+
+it("ignores composed clicks on links inside a shadow root", () => {
+  const root = document.createElement("main");
+  const shadow = root.attachShadow({ mode: "open" });
+  const anchor = document.createElement("a");
+  const nested = document.createElement("span");
+  const requests: unknown[] = [];
+  anchor.href = "https://example.com/";
+  anchor.appendChild(nested);
+  shadow.appendChild(anchor);
+  document.body.appendChild(root);
+  mockSelection(true);
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installCanvasClickNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  nested.dispatchEvent(new MouseEvent("click", { bubbles: true, composed: true }));
+
+  expect(requests).toEqual([]);
+});
+
 it("does not navigate from a click that ends a drag gesture", () => {
   const root = document.createElement("main");
   const requests: unknown[] = [];
