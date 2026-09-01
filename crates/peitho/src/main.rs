@@ -423,7 +423,6 @@ struct WatchRoot {
 struct WatchTargets {
     roots: Vec<WatchRoot>,
     assets: ResolvedAssets,
-    included_files: Vec<PathBuf>,
 }
 
 struct WatchState {
@@ -485,19 +484,10 @@ impl WatchState {
     ) -> miette::Result<()> {
         let key = err.to_string();
         let note = format!(
-            "note: watch error: {err}\nhelp: missing watch targets are dropped and re-watched automatically when they reappear or the deck frontmatter changes; if this error persists, check file watcher permissions"
+            "note: watch error: {err}\nhelp: missing watch targets are dropped and re-watched automatically when they reappear or on the next relevant change (deck, include, image, or asset save); if this error persists, check file watcher permissions"
         );
         write_suppressed_watch_note(&key, &note, stderr, &mut self.emitted_watch_error_notes)?;
         Ok(())
-    }
-
-    fn is_source_change(&self, changed: &Path) -> bool {
-        same_watch_path(&self.input, changed)
-            || self
-                .targets
-                .included_files
-                .iter()
-                .any(|path| same_watch_path(path, changed))
     }
 }
 
@@ -508,9 +498,15 @@ struct WatchRuntime {
 }
 
 impl WatchTargets {
-    /// The deck file plus the resolved asset paths. Each asset path may be a
-    /// single file or a directory whose matching extension files are watched.
-    fn new(input: PathBuf, assets: ResolvedAssets, included_files: Vec<PathBuf>) -> Self {
+    /// The deck file, included Markdown, referenced images, and resolved asset
+    /// paths. Each asset path may be a single file or a directory whose
+    /// matching extension files are watched.
+    fn new(
+        input: PathBuf,
+        assets: ResolvedAssets,
+        included_files: Vec<PathBuf>,
+        image_files: Vec<PathBuf>,
+    ) -> Self {
         let mut roots = vec![WatchRoot {
             path: input.clone(),
             ext: Some("md"),
@@ -519,6 +515,11 @@ impl WatchTargets {
             path,
             ext: Some("md"),
         }));
+        roots.extend(
+            image_files
+                .into_iter()
+                .map(|path| WatchRoot { ext: None, path }),
+        );
         if let Some(path) = assets.layouts.path() {
             roots.push(WatchRoot {
                 path: path.to_path_buf(),
@@ -543,11 +544,7 @@ impl WatchTargets {
                 ext: None,
             });
         }
-        Self {
-            roots,
-            assets,
-            included_files,
-        }
+        Self { roots, assets }
     }
 
     fn is_relevant_change(&self, changed: &Path) -> bool {
@@ -555,7 +552,10 @@ impl WatchTargets {
             if same_watch_path(&root.path, changed) {
                 return true;
             }
-            let matches_root_filter = match root.ext {
+            if !root.path.is_dir() {
+                return false;
+            }
+            match root.ext {
                 Some(ext) => {
                     changed.extension().and_then(|e| e.to_str()) == Some(ext)
                         && changed
@@ -570,8 +570,7 @@ impl WatchTargets {
                             .and_then(|name| name.to_str())
                             .is_none_or(|name| !name.starts_with('.'))
                 }
-            };
-            root.path.is_dir() && matches_root_filter
+            }
         })
     }
 
@@ -1458,12 +1457,8 @@ where
         .iter()
         .any(|changed| state.targets.is_relevant_change(changed));
 
-    if relevant
-        && changed_paths
-            .iter()
-            .any(|changed| state.is_source_change(changed))
-    {
-        refresh_watch_targets_after_source_change(state, stderr)?;
+    if relevant {
+        refresh_watch_targets(state, stderr)?;
     }
 
     let watch_set_changed = state.reconcile_after_events(watcher, stderr)?;
@@ -1475,7 +1470,7 @@ where
 
 fn watch_build(options: BuildOptions) -> miette::Result<()> {
     let (runtime, ()) = run_after_watch_registration(&options.input, prepare_watch_loop, || {
-        println!("watching deck and resolved asset paths");
+        println!("watching deck, referenced images, and resolved asset paths");
         rebuild_once_for_watch(&options, &mut std::io::stdout(), &mut std::io::stderr())
     })?;
     watch_paths_loop(runtime, move |stdout, stderr| {
@@ -1586,10 +1581,28 @@ where
 fn resolve_watch_targets(input: &Path) -> miette::Result<WatchTargets> {
     let loaded = load_and_expand_deck_source(input)?;
     let assets = resolve_assets(input, &loaded.frontmatter)?;
+    let image_files = load_highlighter(assets.syntaxes.path())
+        .ok()
+        .and_then(|highlighter| {
+            peitho_core::referenced_image_paths(
+                &loaded.source,
+                loaded.frontmatter.clone(),
+                &highlighter,
+            )
+            .ok()
+        })
+        .map(|image_paths| {
+            image_paths
+                .into_iter()
+                .map(|raw| asset_resolution::deck_parent(input).join(raw.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(WatchTargets::new(
         input.to_path_buf(),
         assets,
         loaded.included_files(),
+        image_files,
     ))
 }
 
@@ -1607,13 +1620,11 @@ fn deck_only_watch_targets(input: &Path) -> WatchTargets {
             fonts: Provenance::Builtin,
         },
         Vec::new(),
+        Vec::new(),
     )
 }
 
-fn refresh_watch_targets_after_source_change(
-    state: &mut WatchState,
-    stderr: &mut dyn Write,
-) -> miette::Result<()> {
+fn refresh_watch_targets(state: &mut WatchState, stderr: &mut dyn Write) -> miette::Result<()> {
     let current_targets = match resolve_watch_targets(&state.input) {
         Ok(targets) => targets,
         Err(_) => {
@@ -1622,14 +1633,7 @@ fn refresh_watch_targets_after_source_change(
     };
     let asset_paths_changed =
         resolved_asset_paths_changed(&state.targets.assets, &current_targets.assets);
-    let include_paths_changed = path_lists_changed(
-        &state.targets.included_files,
-        &current_targets.included_files,
-    );
     state.targets = current_targets;
-    if !asset_paths_changed && !include_paths_changed {
-        return Ok(());
-    }
     if !asset_paths_changed {
         return Ok(());
     }
@@ -1648,14 +1652,6 @@ fn resolved_asset_paths_changed(old: &ResolvedAssets, new: &ResolvedAssets) -> b
         || old.css.path() != new.css.path()
         || old.syntaxes.path() != new.syntaxes.path()
         || old.fonts.path() != new.fonts.path()
-}
-
-fn path_lists_changed(old: &[PathBuf], new: &[PathBuf]) -> bool {
-    old.len() != new.len()
-        || old
-            .iter()
-            .zip(new)
-            .any(|(old_path, new_path)| !same_watch_path(old_path, new_path))
 }
 
 fn watch_all_dirs(watcher: &mut dyn WatchController, dirs: &[PathBuf]) -> miette::Result<()> {
@@ -4729,6 +4725,7 @@ contexts:
       scope: keyword.control.carina
 "#;
     const TEST_LAYOUT_HTML: &str = r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#;
+    const TEST_IMAGE_LAYOUT_HTML: &str = r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="image" accepts="image" arity="1"></slot></section>"#;
 
     fn has_arg(args: &[OsString], expected: &str) -> bool {
         args.iter().any(|arg| arg == OsStr::new(expected))
@@ -5000,6 +4997,7 @@ contexts:
                 fonts: Provenance::Builtin,
             },
             Vec::new(),
+            Vec::new(),
         );
 
         assert!(targets.is_relevant_change(&dir.path().join("deck.md")));
@@ -5030,6 +5028,7 @@ contexts:
                 fonts: Provenance::Explicit(fonts.clone()),
             },
             Vec::new(),
+            Vec::new(),
         );
 
         assert!(targets.is_relevant_change(&fonts.join("deck-font.woff2")));
@@ -5055,6 +5054,7 @@ contexts:
                 fonts: Provenance::Explicit(fonts.clone()),
             },
             Vec::new(),
+            Vec::new(),
         );
 
         assert!(!targets.is_relevant_change(&fonts.join(".DS_Store")));
@@ -5076,6 +5076,7 @@ contexts:
                 syntaxes: Provenance::Builtin,
                 fonts: Provenance::Explicit(fonts.clone()),
             },
+            Vec::new(),
             Vec::new(),
         );
 
@@ -5104,6 +5105,7 @@ contexts:
                 fonts: Provenance::Explicit(missing_fonts.clone()),
             },
             Vec::new(),
+            Vec::new(),
         );
 
         let dirs = targets.watch_dirs();
@@ -5126,7 +5128,12 @@ contexts:
 
     #[test]
     fn build_options_with_builtin_assets_watch_only_the_deck() {
-        let targets = WatchTargets::new(PathBuf::from("deck.md"), empty_assets(), Vec::new());
+        let targets = WatchTargets::new(
+            PathBuf::from("deck.md"),
+            empty_assets(),
+            Vec::new(),
+            Vec::new(),
+        );
 
         assert!(targets.is_relevant_change(Path::new("deck.md")));
         assert!(!targets.is_relevant_change(Path::new("layout.html")));
@@ -5480,9 +5487,214 @@ contexts:
                 fonts: Provenance::Builtin,
             },
             Vec::new(),
+            Vec::new(),
         );
 
         assert_eq!(targets.watch_dirs(), vec![dir.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn resolve_watch_targets_includes_referenced_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let image_dir = dir.path().join("img");
+        let other_image_dir = dir.path().join("pics");
+        let image = image_dir.join("a.png");
+        let other_image = other_image_dir.join("b.png");
+        fs::create_dir_all(&image_dir).unwrap();
+        fs::create_dir_all(&other_image_dir).unwrap();
+        fs::write(&image, b"image a").unwrap();
+        fs::write(&other_image, b"image b").unwrap();
+        fs::write(
+            &deck,
+            "# First\n\n![x](img/a.png)\n\n---\n# Second\n\n![y](pics/b.png)\n\n---\n# Repeated\n\n![x](img/a.png)\n",
+        )
+        .unwrap();
+
+        let targets = resolve_watch_targets(&deck).unwrap();
+
+        assert!(targets.is_relevant_change(&image));
+        assert!(targets.is_relevant_change(&other_image));
+        assert!(targets.watch_dirs().iter().any(|path| path == &image_dir));
+        assert!(targets
+            .watch_dirs()
+            .iter()
+            .any(|path| path == &other_image_dir));
+    }
+
+    #[test]
+    fn watch_path_handler_rebuilds_after_referenced_image_change() {
+        let fixture = WatchFixture::new("# Intro\n\n![x](img/a.png)\n");
+        let image_dir = fixture._dir.path().join("img");
+        let image = image_dir.join("a.png");
+        let layout = fixture._dir.path().join("layouts/title-body-code.html");
+        let old_bytes = b"old image bytes";
+        let new_bytes = b"new image bytes";
+        fs::create_dir_all(&image_dir).unwrap();
+        fs::write(&image, old_bytes).unwrap();
+        fs::write(layout, TEST_IMAGE_LAYOUT_HTML).unwrap();
+        let mut state = watch_state_for_fixture(&fixture);
+        let mut watcher = RecordingWatchController::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        rebuild_once_for_watch(&fixture.options, &mut stdout, &mut stderr).unwrap();
+        let old_asset = fixture
+            .options
+            .out
+            .join(format!("assets/{}-a.png", short_sha256_hex(old_bytes, 16)));
+        assert!(old_asset.exists());
+        stdout.clear();
+        stderr.clear();
+        fs::write(&image, new_bytes).unwrap();
+
+        handle_watch_paths_with_rebuild(
+            &mut state,
+            &mut watcher,
+            std::slice::from_ref(&image),
+            &mut stdout,
+            &mut stderr,
+            |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
+        )
+        .unwrap();
+
+        let new_asset = fixture
+            .options
+            .out
+            .join(format!("assets/{}-a.png", short_sha256_hex(new_bytes, 16)));
+        assert!(String::from_utf8(stdout).unwrap().contains("built"));
+        assert!(new_asset.exists());
+        assert!(!old_asset.exists());
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn watch_path_handler_rewatches_when_referenced_image_paths_change() {
+        let fixture = WatchFixture::new("# Intro\n\n![x](img/a.png)\n");
+        let image_dir = fixture._dir.path().join("img");
+        let image = image_dir.join("a.png");
+        fs::create_dir_all(&image_dir).unwrap();
+        fs::write(&image, b"image a").unwrap();
+        let mut state = watch_state_for_fixture(&fixture);
+        let mut watcher = RecordingWatchController::default();
+        let other_image_dir = fixture._dir.path().join("pics");
+        let other_image = other_image_dir.join("b.png");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut rebuilds = 0;
+        fs::create_dir_all(&other_image_dir).unwrap();
+        fs::write(&other_image, b"image b").unwrap();
+        fs::write(&fixture.options.input, "# Intro\n\n![x](pics/b.png)\n").unwrap();
+
+        handle_watch_paths_with_rebuild(
+            &mut state,
+            &mut watcher,
+            std::slice::from_ref(&fixture.options.input),
+            &mut stdout,
+            &mut stderr,
+            |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rebuilds, 1);
+        assert!(state.targets.is_relevant_change(&other_image));
+        assert!(!state.targets.is_relevant_change(&image));
+        assert!(watcher.watched.iter().any(|path| path == &other_image_dir));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn watch_path_handler_refreshes_image_targets_after_highlighter_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let image_dir = dir.path().join("img");
+        let image = image_dir.join("a.png");
+        let syntaxes = dir.path().join("syntaxes");
+        let syntax = syntaxes.join("x.sublime-syntax");
+        fs::create_dir_all(&image_dir).unwrap();
+        fs::create_dir_all(&syntaxes).unwrap();
+        fs::write(&image, b"image a").unwrap();
+        fs::write(&deck, "# Intro\n\n![x](img/a.png)\n").unwrap();
+        let targets = resolve_watch_targets(&deck).unwrap();
+        assert!(!targets.is_relevant_change(&image));
+        let watched_dirs = targets.watch_dirs();
+        let mut state = WatchState::new(deck, targets, watched_dirs);
+        let mut watcher = RecordingWatchController::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut rebuilds = 0;
+        fs::write(&syntax, CARINA_SUBLIME_SYNTAX).unwrap();
+
+        handle_watch_paths_with_rebuild(
+            &mut state,
+            &mut watcher,
+            std::slice::from_ref(&syntax),
+            &mut stdout,
+            &mut stderr,
+            |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rebuilds, 1);
+        assert!(state.targets.is_relevant_change(&image));
+        assert!(watcher.watched.iter().any(|path| path == &image_dir));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn resolve_watch_targets_keeps_includes_and_assets_when_deck_parse_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let image_dir = dir.path().join("img");
+        let image = image_dir.join("a.png");
+        let shared = dir.path().join("shared");
+        let included = shared.join("intro.md");
+        let layouts = dir.path().join("layouts");
+        fs::create_dir_all(&image_dir).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::create_dir_all(&layouts).unwrap();
+        fs::write(&image, b"image").unwrap();
+        fs::write(&included, "# Included\n").unwrap();
+        fs::write(layouts.join("title-body-code.html"), TEST_LAYOUT_HTML).unwrap();
+        fs::write(
+            &deck,
+            "<!-- {\"include\":\"shared/intro.md\"} -->\n---\n# Broken\n\n![x](img/a.png)\n\n```nosuchlang\ncontent\n```\n",
+        )
+        .unwrap();
+
+        let targets = resolve_watch_targets(&deck).unwrap();
+
+        assert!(!targets.is_relevant_change(&image));
+        assert!(targets.is_relevant_change(&included));
+        assert_eq!(
+            targets.assets.layouts,
+            Provenance::DeckAdjacent(layouts.clone())
+        );
+        let watched_dirs = targets.watch_dirs();
+        assert!(watched_dirs.iter().any(|path| path == &shared));
+        assert!(watched_dirs.iter().any(|path| path == &layouts));
+    }
+
+    #[test]
+    fn resolve_watch_targets_does_not_watch_generated_images_for_mermaid() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let generated_cache = dir.path().join(peitho_core::CODE_IMAGES_CACHE_DIR);
+        fs::write(&deck, "# Diagram\n\n```mermaid\ngraph TD\n  A --> B\n```\n").unwrap();
+
+        let targets = resolve_watch_targets(&deck).unwrap();
+
+        assert!(!generated_cache.exists());
+        assert!(!targets
+            .watch_dirs()
+            .iter()
+            .any(|path| same_watch_path(path, &generated_cache)));
     }
 
     #[test]
@@ -5824,7 +6036,7 @@ contexts:
         .unwrap();
         let mut stderr = Vec::new();
 
-        refresh_watch_targets_after_source_change(&mut state, &mut stderr).unwrap();
+        refresh_watch_targets(&mut state, &mut stderr).unwrap();
 
         assert!(state.watched_dirs.iter().any(|path| path == &old_layouts));
         assert_eq!(
@@ -5854,7 +6066,7 @@ contexts:
         fs::write(&deck, "---\nlayouts: ./layouts\n---\n# Intro\n").unwrap();
         let mut stderr = Vec::new();
 
-        refresh_watch_targets_after_source_change(&mut state, &mut stderr).unwrap();
+        refresh_watch_targets(&mut state, &mut stderr).unwrap();
 
         assert!(
             stderr.is_empty(),
@@ -9882,11 +10094,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
             r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="code" accepts="code" arity="1"></slot></section>"#,
         )
         .unwrap();
-        fs::write(
-            layouts.join("image.html"),
-            r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="image" accepts="image" arity="1"></slot></section>"#,
-        )
-        .unwrap();
+        fs::write(layouts.join("image.html"), TEST_IMAGE_LAYOUT_HTML).unwrap();
         fs::write(
             &deck,
             format!(

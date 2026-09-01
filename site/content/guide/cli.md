@@ -36,8 +36,8 @@ successful rebuild.
 peitho preview
 ```
 
-It watches the deck and its assets, serves locally, and reloads while
-preserving the current slide and overview state.
+It watches the deck, its referenced images, and its assets, serves locally,
+and reloads while preserving the current slide and overview state.
 
 `--port <PORT>` pins the server port, which is otherwise an ephemeral port
 chosen at startup. `--no-open` starts the server without launching a browser —
@@ -284,8 +284,8 @@ pipeline:
 peitho build --watch
 ```
 
-`--watch` rebuilds on every change to the deck or its assets. `--out <DIR>`
-writes somewhere other than `dist`.
+`--watch` rebuilds on every change to the deck, its referenced images, or its
+assets. `--out <DIR>` writes somewhere other than `dist`.
 
 ## `peitho layouts`
 

@@ -163,9 +163,10 @@ Bare boolean values such as `mermaid: false` and `math: true` are reserved for
 possible future built-in opt-out syntax and are rejected with a line-numbered
 error. Use a command string when you want an override.
 
-Preview watches the deck, layout, CSS, syntax, and font roots. It does not watch
-files read by the command itself, such as Mermaid theme files or config JSON.
-Restart preview or touch the deck after changing those command inputs.
+Preview watches the deck, author-referenced images, layout, CSS, syntax, and
+font roots. It does not watch files read by the command itself, such as Mermaid
+theme files or config JSON. Restart preview or touch the deck after changing
+those command inputs.
 
 See [Code Images](@/examples/code-images.md) for a complete built-in Mermaid
 and Graphviz example deck, [Math](@/examples/math.md) for built-in math, and

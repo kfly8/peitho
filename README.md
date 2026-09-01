@@ -71,7 +71,7 @@ enum Phase { Parsed, Mapped, Checked, Rendered }
 
 ### Preview while you write
 
-`peitho preview` watches the deck and its assets, rebuilds on every save, and reloads the browser — keeping the slide you were on and the overview mode across reloads:
+`peitho preview` watches the deck, its referenced images, and its assets, rebuilds on every save, and reloads the browser — keeping the slide you were on and the overview mode across reloads:
 
 ![peitho preview prints the URL it is serving on, plus a rebuild line on every save](site/static/guide-shots/cli-preview.png)
 
