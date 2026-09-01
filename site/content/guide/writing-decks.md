@@ -309,6 +309,18 @@ Line numbers past the end of the block, malformed specs, stepped emphasis
 inside a `::: {reveal}` group (which would nest two step spaces), and emphasis
 on a `code_images` block are all line-numbered build errors.
 
+## Links
+
+A link to an `http:` or `https:` URL (`[source](https://example.com/post)`)
+is rendered with `target="_blank" rel="noopener"`, so clicking a citation
+mid-presentation opens it in a new tab (a new window when the slides run in
+`peitho present`'s app-mode window) instead of replacing the deck. The click
+itself never advances the slide either. This applies in `peitho preview`,
+`peitho present`, and the built deck alike. Relative paths, `#fragment`
+destinations, and non-navigating schemes such as `mailto:` keep the browser's
+default behavior, and there is no switch — a link that leaves the deck should
+never navigate the deck away.
+
 ## Speaker notes
 
 Non-JSON HTML comments anywhere in a slide become presenter speaker notes. Empty

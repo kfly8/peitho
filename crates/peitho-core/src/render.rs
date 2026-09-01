@@ -2,7 +2,8 @@ use std::{collections::BTreeMap, error::Error, ops::Range};
 
 use html_escape::{encode_double_quoted_attribute, encode_text};
 use lol_html::{
-    element, errors::RewritingError, html_content::ContentType, HtmlRewriter, Settings,
+    element, errors::RewritingError, html_content::ContentType, rewrite_str, HtmlRewriter,
+    RewriteStrSettings, Settings,
 };
 use pulldown_cmark::{html, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
@@ -285,7 +286,7 @@ fn render_slot(
     }
 
     let class_name = slot.class_name();
-    Ok(match accepts {
+    let html = match accepts {
         Accepts::Inline => {
             let body = fragments
                 .iter()
@@ -341,7 +342,44 @@ fn render_slot(
             footnote_numbers,
             highlighter,
         )?,
-    })
+    };
+    open_external_links_in_new_tab(&html, fragments[0].line())
+}
+
+fn open_external_links_in_new_tab(html: &str, line: usize) -> Result<String> {
+    rewrite_str(
+        html,
+        RewriteStrSettings {
+            element_content_handlers: vec![element!("a[href]", |el| {
+                let href = el
+                    .get_attribute("href")
+                    .expect("a[href] selector guarantees an href attribute");
+                let has_http_scheme = href.split_once(':').is_some_and(|(scheme, _)| {
+                    scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+                });
+                if !has_http_scheme {
+                    return Ok(());
+                }
+                el.set_attribute("target", "_blank")?;
+                if el.get_attribute("rel").is_none() {
+                    el.set_attribute("rel", "noopener")?;
+                }
+                Ok(())
+            })],
+            ..RewriteStrSettings::new()
+        },
+    )
+    .map_err(|err| link_post_process_error(err, line))
+}
+
+fn link_post_process_error(err: RewritingError, line: usize) -> BuildError {
+    let message = err.to_string();
+    BuildError::new(
+        ErrorKind::Layout,
+        Some(line),
+        format!("internal render error: link post-processing failed: {message}"),
+        "report this issue with the slide Markdown that triggered it",
+    )
 }
 
 fn collect_footnote_numbers(
@@ -1422,19 +1460,21 @@ fn render_heading_inline(
 ) -> Result<String> {
     let mut events = Vec::new();
     let mut in_heading = false;
+    let mut in_html_comment = false;
     for event in Parser::new_ext(markdown, BODY_MARKDOWN_OPTIONS) {
         match event {
             Event::Start(Tag::Heading { .. }) => in_heading = true,
             Event::End(TagEnd::Heading(_)) => break,
-            Event::FootnoteReference(label) if in_heading => {
-                let Some(number) = footnote_numbers.get(label.as_ref()).copied() else {
-                    return Err(missing_footnote_render_error(label.as_ref()));
-                };
-                events.push(Event::Html(render_footnote_reference(number).into()));
-            }
             event => {
                 if in_heading {
-                    events.push(event);
+                    if let Some(event) = normalize_markdown_event(
+                        event,
+                        false,
+                        footnote_numbers,
+                        &mut in_html_comment,
+                    )? {
+                        events.push(event);
+                    }
                 }
             }
         }
@@ -1645,14 +1685,15 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
       return selection !== null && !selection.isCollapsed;
     }
     function shouldIgnoreNavigationClick(event) {
+      const start = __clickStart;
+      __clickStart = null;
+      const origin = event.composedPath()[0];
+      if (origin instanceof Element && origin.closest('a') !== null) return true;
       if (hasNonCollapsedSelection()) {
-        __clickStart = null;
         return true;
       }
-      if (__clickStart === null) return false;
-      const moved = Math.hypot(event.clientX - __clickStart.x, event.clientY - __clickStart.y) > 5;
-      __clickStart = null;
-      return moved;
+      if (start === null) return false;
+      return Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5;
     }
     document.addEventListener('click', (event) => {
       if (shouldIgnoreNavigationClick(event)) return;
@@ -2361,7 +2402,7 @@ mod tests {
     use crate::{
         check::check_deck,
         domain::{AspectRatio, FootnoteEntry, RawImagePath, RevealSpan},
-        embed_card::EmbedCardAssets,
+        embed_card::{build_embed_card_html, EmbedCardAssets, OEmbedDocument},
         layout::{parse_layout, Layout},
         mapping::map_by_convention,
         parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
@@ -2398,6 +2439,17 @@ mod tests {
         let start = html.find("<pre").expect("rendered pre block");
         let end = html[start..].find("</pre>").expect("closed pre block") + start + "</pre>".len();
         &html[start..end]
+    }
+
+    fn opening_tag<'a>(html: &'a str, prefix: &str) -> &'a str {
+        let start = html
+            .find(prefix)
+            .unwrap_or_else(|| panic!("opening tag with prefix {prefix:?}"));
+        let end = start
+            + html[start..]
+                .find('>')
+                .unwrap_or_else(|| panic!("opening tag with prefix {prefix:?} is not closed"));
+        &html[start..=end]
     }
 
     fn javascript_timeout_ms(source: &str, name: &str) -> u64 {
@@ -2559,6 +2611,160 @@ mod tests {
             "{html}"
         );
         assert!(!html.contains("~~deleted~~"), "{html}");
+    }
+
+    #[test]
+    fn opens_only_http_links_in_new_tabs_and_preserves_other_html() {
+        let cases = [
+            (
+                "https",
+                r#"<a href="https://example.com/">https</a>"#,
+                r#"<a href="https://example.com/" target="_blank" rel="noopener">https</a>"#,
+            ),
+            (
+                "http",
+                r#"<a href="http://example.com/">http</a>"#,
+                r#"<a href="http://example.com/" target="_blank" rel="noopener">http</a>"#,
+            ),
+            (
+                "uppercase scheme",
+                r#"<a href="HTTPS://example.com/">uppercase</a>"#,
+                r#"<a href="HTTPS://example.com/" target="_blank" rel="noopener">uppercase</a>"#,
+            ),
+            (
+                "href entity",
+                r#"<a href="https://x/?a=1&amp;b=2">query</a>"#,
+                r#"<a href="https://x/?a=1&amp;b=2" target="_blank" rel="noopener">query</a>"#,
+            ),
+            (
+                "mailto",
+                r#"<a href="mailto:a@b.c">mail</a>"#,
+                r#"<a href="mailto:a@b.c">mail</a>"#,
+            ),
+            (
+                "telephone",
+                r#"<a href="tel:+12025550123">call</a>"#,
+                r#"<a href="tel:+12025550123">call</a>"#,
+            ),
+            (
+                "relative",
+                r#"<a href="other.html">relative</a>"#,
+                r#"<a href="other.html">relative</a>"#,
+            ),
+            (
+                "absolute path",
+                r#"<a href="/abs/path">path</a>"#,
+                r#"<a href="/abs/path">path</a>"#,
+            ),
+            (
+                "fragment",
+                r##"<a href="#top">top</a>"##,
+                r##"<a href="#top">top</a>"##,
+            ),
+            (
+                "existing rel",
+                r#"<a href="https://example.com/" rel="noopener noreferrer">external</a>"#,
+                r#"<a href="https://example.com/" rel="noopener noreferrer" target="_blank">external</a>"#,
+            ),
+            (
+                "title",
+                r#"<a href="https://example.com/" title="Reference &amp; notes">external</a>"#,
+                r#"<a href="https://example.com/" title="Reference &amp; notes" target="_blank" rel="noopener">external</a>"#,
+            ),
+            (
+                "no anchors",
+                r#"<p>plain &amp; byte-identical</p>"#,
+                r#"<p>plain &amp; byte-identical</p>"#,
+            ),
+        ];
+
+        for (name, input, expected) in cases {
+            assert_eq!(
+                open_external_links_in_new_tab(input, 1).unwrap(),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn external_link_post_process_error_reports_internal_error_with_line() {
+        let err = open_external_links_in_new_tab("<select><xmp><script>", 17).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Layout);
+        assert_eq!(err.line, Some(17));
+        assert!(
+            err.message
+                .starts_with("internal render error: link post-processing failed:"),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            err.help,
+            "report this issue with the slide Markdown that triggered it"
+        );
+    }
+
+    #[test]
+    fn render_slot_opens_paragraph_http_link_in_new_tab() {
+        let rendered = render_checked_deck_with_layout(
+            "# Title\n\n[text](https://example.com/)",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(
+            html.contains(
+                r#"<a href="https://example.com/" target="_blank" rel="noopener">text</a>"#
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn render_slot_opens_heading_http_link_in_new_tab() {
+        let rendered = render_checked_deck_with_layout(
+            "# See [docs](https://example.com/)",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(
+            html.contains(
+                r#"<span class="slot-title">See <a href="https://example.com/" target="_blank" rel="noopener">docs</a></span>"#
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn render_slot_opens_footnote_body_http_link_in_new_tab() {
+        let rendered = render_checked_deck_with_layout(
+            "# Title\n\nClaim[^source].\n\n[^source]: [reference](https://example.com/)",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(
+            html.contains(
+                r#"<li><p><a href="https://example.com/" target="_blank" rel="noopener">reference</a></p>"#
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn render_heading_drops_html_comment_from_title_slot() {
+        let rendered =
+            render_checked_deck_with_layout("# Title <!-- secret -->", title_body_layout());
+        let html = rendered.slides()[0].html();
+
+        assert!(
+            html.contains(r#"<span class="slot-title">Title </span>"#),
+            "{html}"
+        );
+        assert!(!html.contains("secret"), "{html}");
+        assert!(!html.contains("<!--"), "{html}");
     }
 
     #[test]
@@ -3787,7 +3993,10 @@ mod tests {
     #[test]
     fn rendered_deck_prepends_card_css_before_theme_only_when_used() {
         let theme_css = ".peitho-slide { color: red; }\n";
-        let with_card = render_checked_with_css(checked_deck_with_card_body(false), theme_css);
+        let with_card = render_checked_with_css(
+            checked_deck_with_card_body(false, TEST_CARD_HTML),
+            theme_css,
+        );
         let without_card = render_checked_deck_with_layout_and_css(
             "# Intro\n\nBody",
             title_body_layout(),
@@ -3815,7 +4024,10 @@ mod tests {
     #[test]
     fn x_card_only_render_keeps_issue_398_html_and_css_bytes() {
         let theme_css = ".theme { color: red; }\n";
-        let rendered = render_checked_with_css(checked_deck_with_card_body(false), theme_css);
+        let rendered = render_checked_with_css(
+            checked_deck_with_card_body(false, TEST_CARD_HTML),
+            theme_css,
+        );
 
         assert_eq!(
             rendered.slides()[0].html(),
@@ -3825,6 +4037,22 @@ mod tests {
             rendered.css(),
             format!("{}\n{theme_css}", EmbedCardAssets::builtin().css())
         );
+    }
+
+    #[test]
+    fn render_slot_opens_x_embed_card_author_link_in_new_tab() {
+        let document = OEmbedDocument {
+            html: r#"<blockquote class="twitter-tweet"><p>hello</p>&mdash; A (@a) <a href="https://x.com/a/status/1">August 5, 2026</a></blockquote>"#.to_owned(),
+            author_name: "A".to_owned(),
+            url: "https://x.com/a/status/1".to_owned(),
+        };
+        let markup = build_embed_card_html(3, "https://x.com/a/status/1", &document).unwrap();
+        let rendered = render_checked(checked_deck_with_card_body(false, markup.html));
+        let html = rendered.slides()[0].html();
+        let author = opening_tag(html, r#"<a class="peitho-embed-card__author""#);
+
+        assert!(author.contains(r#"target="_blank""#), "{author}");
+        assert!(author.contains(r#"rel="noopener noreferrer""#), "{author}");
     }
 
     #[test]
@@ -3865,6 +4093,19 @@ mod tests {
         assert!(!html.contains(".peitho/embeds-cache"), "{html}");
         assert!(!html.contains("<iframe"), "{html}");
         assert!(!html.contains("<script"), "{html}");
+    }
+
+    #[test]
+    fn render_slot_opens_generic_card_permalink_in_new_tab() {
+        let rendered = render_checked(checked_deck_with_generic_card_body(false, false));
+        let html = rendered.slides()[0].html();
+        let permalink = opening_tag(html, r#"<a class="peitho-embed-card__permalink""#);
+
+        assert!(permalink.contains(r#"target="_blank""#), "{permalink}");
+        assert!(
+            permalink.contains(r#"rel="noopener noreferrer""#),
+            "{permalink}"
+        );
     }
 
     #[test]
@@ -4082,7 +4323,10 @@ mod tests {
     #[test]
     fn decks_without_generic_cards_keep_existing_css_bytes() {
         let theme_css = ".theme { color: red; }\n";
-        let x = render_checked_with_css(checked_deck_with_card_body(false), theme_css);
+        let x = render_checked_with_css(
+            checked_deck_with_card_body(false, TEST_CARD_HTML),
+            theme_css,
+        );
         let math = render_checked_with_css(checked_deck_with_math_body(), theme_css);
         let plain = render_checked_deck_with_layout_and_css(
             "# Intro\n\nBody",
@@ -4104,7 +4348,8 @@ mod tests {
     #[test]
     fn rendered_deck_with_math_and_card_keeps_theme_last() {
         let theme_css = ".theme { color: rebeccapurple; }\n";
-        let rendered = render_checked_with_css(checked_deck_with_card_body(true), theme_css);
+        let rendered =
+            render_checked_with_css(checked_deck_with_card_body(true, TEST_CARD_HTML), theme_css);
 
         assert_eq!(
             rendered.css(),
@@ -4266,7 +4511,8 @@ mod tests {
 
         assert!(html.contains("<strong>Architecture</strong>"));
         assert!(html.contains("<code>Phase</code>"));
-        assert!(html.contains(r#"<a href="https://example.com">docs</a>"#));
+        assert!(html
+            .contains(r#"<a href="https://example.com" target="_blank" rel="noopener">docs</a>"#));
         assert!(!html.contains("<p><strong>Architecture</strong>"));
     }
 
@@ -4519,8 +4765,16 @@ Paragraph after heading.
 
         assert!(html.contains("window.getSelection()"));
         assert!(html.contains("__clickStart"));
-        assert!(html.contains("Math.hypot(event.clientX - __clickStart.x"));
+        assert!(html.contains("Math.hypot(event.clientX - start.x"));
         assert!(html.contains("return selection !== null && !selection.isCollapsed"));
+    }
+
+    #[test]
+    fn distribution_index_click_navigation_ignores_anchor_clicks() {
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+
+        assert!(html.contains("const origin = event.composedPath()[0]"));
+        assert!(html.contains("origin instanceof Element && origin.closest('a') !== null"));
     }
 
     #[test]
@@ -5643,15 +5897,16 @@ Paragraph after heading.
         )
     }
 
-    fn checked_deck_with_card_body(include_math: bool) -> Deck<Checked> {
+    const TEST_CARD_HTML: &str = "<article>card html</article>";
+
+    fn checked_deck_with_card_body(
+        include_math: bool,
+        card_html: impl Into<String>,
+    ) -> Deck<Checked> {
         let layout = title_body_layout();
         let title = SlotName::new("title").unwrap();
         let body = SlotName::new("body").unwrap();
-        let mut fragments = vec![SourceFragment::embed_card(
-            3,
-            "<article>card html</article>",
-            "tweet text",
-        )];
+        let mut fragments = vec![SourceFragment::embed_card(3, card_html, "tweet text")];
         if include_math {
             fragments.insert(
                 0,
