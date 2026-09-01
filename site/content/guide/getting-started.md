@@ -71,9 +71,9 @@ Use preview for the daily editing loop:
 peitho preview
 ```
 
-Preview watches the deck and its assets, serves the deck locally, and reloads
-the browser after each successful rebuild while preserving the current slide
-and overview mode.
+Preview watches the deck, its referenced images, and its assets, serves the
+deck locally, and reloads the browser after each successful rebuild while
+preserving the current slide and overview mode.
 
 ![peitho preview showing a single slide in the browser](/guide-shots/preview-single.png)
 

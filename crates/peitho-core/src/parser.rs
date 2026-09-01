@@ -526,6 +526,44 @@ fn leading_frontmatter_start_line(source: &str) -> Option<usize> {
         .map(|(offset, _)| line_for_offset(source, offset))
 }
 
+/// Return author-referenced image paths without transforming code-image or embed fragments.
+pub fn referenced_image_paths(
+    source: &str,
+    frontmatter: ParsedFrontmatter,
+    highlighter: &Highlighter,
+) -> Result<Vec<RawImagePath>> {
+    fn collect(fragments: &[SourceFragment], paths: &mut Vec<RawImagePath>) {
+        for fragment in fragments {
+            match fragment.kind() {
+                FragmentKind::Image { src, .. } => {
+                    if !paths.contains(src) {
+                        paths.push(src.clone());
+                    }
+                }
+                FragmentKind::SlotGroup { children, .. } => collect(children, paths),
+                FragmentKind::Heading { .. }
+                | FragmentKind::Paragraph
+                | FragmentKind::Text
+                | FragmentKind::Code
+                | FragmentKind::Math { .. }
+                | FragmentKind::EmbedCard { .. }
+                | FragmentKind::GenericEmbedCard { .. }
+                | FragmentKind::Footnotes { .. }
+                | FragmentKind::List
+                | FragmentKind::Blockquote
+                | FragmentKind::Table => {}
+            }
+        }
+    }
+
+    let deck = parse_markdown(source, frontmatter, highlighter)?;
+    let mut paths = Vec::new();
+    for slide in deck.parsed_slides() {
+        collect(&slide.fragments, &mut paths);
+    }
+    Ok(paths)
+}
+
 pub(crate) fn parse_markdown(
     source: &str,
     frontmatter: ParsedFrontmatter,
@@ -5251,6 +5289,61 @@ Grouped content[^grouped].
             }
             other => panic!("expected image fragment, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn referenced_image_paths_lists_author_paths_recursively() {
+        let source = "# First\n\n![a](img/a.png)\n\n---\n# Second\n\n::: {slot=body}\n\n![b](pics/b.png)\n\n:::\n";
+        let frontmatter = crate::parse_frontmatter(source).unwrap();
+
+        let image_paths = crate::referenced_image_paths(
+            source,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let image_paths = image_paths
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(image_paths, vec!["img/a.png", "pics/b.png"]);
+    }
+
+    #[test]
+    fn referenced_image_paths_deduplicates_repeated_paths() {
+        let source = "# First\n\n![a](img/a.png)\n\n---\n# Second\n\n![again](img/a.png)\n";
+        let frontmatter = crate::parse_frontmatter(source).unwrap();
+
+        let image_paths = crate::referenced_image_paths(
+            source,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            image_paths
+                .iter()
+                .map(|path| path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["img/a.png"]
+        );
+    }
+
+    #[test]
+    fn referenced_image_paths_ignores_untransformed_mermaid_block() {
+        let source = "# Diagram\n\n```mermaid\ngraph TD\n  A --> B\n```\n";
+        let frontmatter = crate::parse_frontmatter(source).unwrap();
+
+        let image_paths = crate::referenced_image_paths(
+            source,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert!(image_paths.is_empty());
     }
 
     #[test]
