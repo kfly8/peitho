@@ -796,6 +796,7 @@ enum Command {
         #[arg(
             value_name = "TOPIC",
             conflicts_with = "all",
+            value_parser = clap::builder::PossibleValuesParser::new(docs::topic_slugs()),
             help = "Guide topic slug; run `peitho docs` to list them"
         )]
         topic: Option<String>,
@@ -7708,6 +7709,20 @@ contexts:
                 panic!("expected export pdf command");
             }
         }
+    }
+
+    #[test]
+    fn docs_topic_lists_every_guide_slug_as_a_possible_value() {
+        let cmd = Cli::command();
+        let docs = cmd.find_subcommand("docs").unwrap();
+        let topic = docs.get_positionals().next().unwrap();
+        let values: Vec<String> = topic
+            .get_possible_values()
+            .iter()
+            .map(|value| value.get_name().to_string())
+            .collect();
+        assert_eq!(values, docs::topic_slugs().collect::<Vec<_>>());
+        assert!(values.contains(&"getting-started".to_string()));
     }
 
     #[test]
