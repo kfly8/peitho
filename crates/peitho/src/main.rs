@@ -16,7 +16,7 @@ use std::{
 };
 
 use chrono::TimeZone;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use clap_complete::{generate, Shell};
 use miette::IntoDiagnostic;
 use notify::{PollWatcher, RecursiveMode};
@@ -705,12 +705,23 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Scaffold a starter deck into a directory.
     New {
-        #[arg(default_value = ".")]
+        #[arg(default_value = ".", value_hint = ValueHint::DirPath)]
         dir: PathBuf,
-        #[arg(long, value_enum, default_value_t = new_cmd::LayoutVariant::Default)]
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = new_cmd::LayoutVariant::Default,
+            help = "Layout variant to scaffold"
+        )]
         layouts: new_cmd::LayoutVariant,
-        #[arg(long, value_enum, default_value_t = new_cmd::ThemeVariant::Light)]
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = new_cmd::ThemeVariant::Light,
+            help = "Theme variant to scaffold"
+        )]
         theme: new_cmd::ThemeVariant,
         #[arg(
             long,
@@ -718,40 +729,59 @@ enum Command {
         )]
         force: bool,
     },
+    /// Build the distributable dist/ directory.
     Build {
         #[arg(default_value = "deck.md")]
         input: PathBuf,
-        #[arg(long, default_value = "dist")]
+        #[arg(
+            long,
+            default_value = "dist",
+            value_hint = ValueHint::DirPath,
+            help = "Output directory"
+        )]
         out: PathBuf,
-        #[arg(long)]
+        #[arg(long, help = "Rebuild on every change to the deck and its assets")]
         watch: bool,
     },
+    /// Render every slide in headless Chrome and report overflow.
     Lint {
         #[arg(default_value = "deck.md")]
         input: PathBuf,
     },
+    /// Print the resolved layouts and their slot contracts.
     Layouts {
         #[arg(default_value = "deck.md")]
         input: PathBuf,
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "SLIDE",
+            help = "Explain layout dispatch for the slide with this key"
+        )]
         explain: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Print as JSON")]
         json: bool,
     },
+    /// Diagnose the runtime environment and deck asset resolution.
     Doctor {
         #[arg(default_value = "deck.md")]
         input: PathBuf,
-        #[arg(long)]
+        #[arg(long, help = "Print as JSON")]
         json: bool,
     },
+    /// Watch, serve, and reload the deck on every successful rebuild.
     Preview {
         #[arg(default_value = "deck.md")]
         input: PathBuf,
-        #[arg(long, default_value_t = 0)]
+        #[arg(
+            long,
+            default_value_t = 0,
+            help = "Port for the preview server (0 picks a random port)"
+        )]
         port: u16,
-        #[arg(long)]
+        #[arg(long, help = "Do not open the browser")]
         no_open: bool,
     },
+    /// Present the deck full-screen with the presenter view.
     Present {
         #[arg(default_value = "deck.md")]
         input: PathBuf,
@@ -759,15 +789,15 @@ enum Command {
         shell: Option<PathBuf>,
         #[arg(long, help = present_port_help())]
         port: Option<u16>,
-        #[arg(long)]
+        #[arg(long, help = "Do not open the browser")]
         no_open: bool,
-        #[arg(long)]
+        #[arg(long, help = "Only write the present cache; start no server")]
         no_serve: bool,
-        #[arg(long)]
+        #[arg(long, help = "Open the slides window only")]
         no_presenter: bool,
-        #[arg(long)]
+        #[arg(long, help = "Open the presenter view windowed instead of full-screen")]
         presenter_windowed: bool,
-        #[arg(long)]
+        #[arg(long, help = "Record per-section actuals to .peitho/rehearsals/")]
         rehearsal: bool,
         #[arg(
             long,
@@ -777,16 +807,28 @@ enum Command {
         )]
         host: Option<Option<IpAddr>>,
     },
+    /// Print recorded rehearsals as a section timing table.
     Rehearsal {
-        #[arg(long)]
+        #[arg(long, help = "Print every recorded rehearsal, oldest first")]
         all: bool,
     },
+    /// Check the built output, then run a deploy command against it.
     Publish {
-        #[arg(long, default_value = "dist")]
+        #[arg(
+            long,
+            default_value = "dist",
+            value_hint = ValueHint::DirPath,
+            help = "Built output directory to publish"
+        )]
         dist: PathBuf,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_hint = ValueHint::CommandWithArguments
+        )]
         command: Vec<OsString>,
     },
+    /// Export the deck to another format.
     Export {
         #[command(subcommand)]
         command: ExportCommand,
@@ -796,23 +838,24 @@ enum Command {
         #[arg(
             value_name = "TOPIC",
             conflicts_with = "all",
+            value_parser = clap::builder::PossibleValuesParser::new(docs::topic_slugs()),
             help = "Guide topic slug; run `peitho docs` to list them"
         )]
         topic: Option<String>,
         #[arg(long, help = "Print every guide page in order")]
         all: bool,
     },
-    Completions {
-        shell: Shell,
-    },
+    /// Generate a shell completion script.
+    Completions { shell: Shell },
 }
 
 #[derive(Debug, Subcommand)]
 enum ExportCommand {
+    /// Export a PDF.
     Pdf {
         #[arg(default_value = "deck.md")]
         input: PathBuf,
-        #[arg(short, long)]
+        #[arg(short, long, help = "Output path (default: <INPUT stem>.pdf)")]
         out: Option<PathBuf>,
     },
 }
@@ -7708,6 +7751,20 @@ contexts:
                 panic!("expected export pdf command");
             }
         }
+    }
+
+    #[test]
+    fn docs_topic_lists_every_guide_slug_as_a_possible_value() {
+        let cmd = Cli::command();
+        let docs = cmd.find_subcommand("docs").unwrap();
+        let topic = docs.get_positionals().next().unwrap();
+        let values: Vec<String> = topic
+            .get_possible_values()
+            .iter()
+            .map(|value| value.get_name().to_string())
+            .collect();
+        assert_eq!(values, docs::topic_slugs().collect::<Vec<_>>());
+        assert!(values.contains(&"getting-started".to_string()));
     }
 
     #[test]

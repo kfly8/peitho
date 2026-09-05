@@ -140,6 +140,10 @@ fn invalid_frontmatter(slug: &str, detail: impl Into<String>) -> BuildError {
     )
 }
 
+pub(crate) fn topic_slugs() -> impl Iterator<Item = &'static str> {
+    TOPICS.iter().map(|topic| topic.slug)
+}
+
 pub(crate) fn render(topic: Option<&str>, all: bool) -> Result<String, BuildError> {
     if all {
         return Ok(render_all());
@@ -508,7 +512,7 @@ mod tests {
         let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
 
         assert!(
-            stderr.contains("unknown docs topic 'missing'"),
+            stderr.contains("invalid value 'missing' for '[TOPIC]'"),
             "actual stderr: {stderr}"
         );
         for topic in TOPICS.iter() {
