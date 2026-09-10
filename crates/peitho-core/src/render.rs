@@ -5671,6 +5671,13 @@ Paragraph after heading.
     }
 
     #[test]
+    fn lint_measure_script_reads_the_font_size_waiver_property() {
+        assert!(LINT_MEASURE_JS.contains(r#""--peitho-lint-min-font-size""#));
+        assert!(LINT_MEASURE_JS.contains("fontSizeWaiver:"));
+        assert!(LINT_MEASURE_JS.contains("fontSizeWaiverError:"));
+    }
+
+    #[test]
     fn lint_measure_script_publishes_before_chrome_prints() {
         // Regression: bounding the readiness waits only shortens the race
         // against Chrome's --print-to-pdf teardown, it does not order it, so

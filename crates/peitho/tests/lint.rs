@@ -158,6 +158,75 @@ fn lint_reports_ellipsis_truncation_as_a_note_without_warning() {
 
 #[test]
 #[ignore]
+fn lint_reports_waived_small_text_as_a_note_and_text_below_the_floor_as_a_warning() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping lint_reports_waived_small_text_as_a_note_and_text_below_the_floor_as_a_warning: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_default_theme(
+        dir.path(),
+        ".slot-body { font-size: 14pt; --peitho-lint-min-font-size: 12pt; }\n\
+         [data-slide-key=\"tiny\"] .slot-body { font-size: 10pt; }\n",
+    );
+    fs::write(
+        &deck,
+        "# Allowed\n\nSource: annual report\n\n---\n\n<!-- {\"key\":\"tiny\"} -->\n# Too small\n\nFine print\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "note: slide 1 has text at 14pt, allowed by --peitho-lint-min-font-size: 12pt: \"Source: annual report\"",
+        ))
+        .stdout(predicate::str::contains(
+            "warning: slide 2 has text at 10pt, below the layout's --peitho-lint-min-font-size of 12pt: \"Fine print\"",
+        ))
+        .stdout(predicate::str::contains("below the recommended 24pt").not())
+        .stdout(predicate::str::contains("checked 2 slide(s): 1 warning(s)"));
+}
+
+#[test]
+#[ignore]
+fn lint_rejects_an_invalid_font_size_waiver_value() {
+    let Some(chrome) = test_chrome_path() else {
+        println!("skipping lint_rejects_an_invalid_font_size_waiver_value: Chrome not found");
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_default_theme(
+        dir.path(),
+        ".slot-body { --peitho-lint-min-font-size: none; }\n",
+    );
+    fs::write(&deck, "# Title\n\nBody text\n").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "slide 1 has an invalid --peitho-lint-min-font-size value `none`",
+        ))
+        .stderr(predicate::str::contains(
+            "use a length in pt or px, such as 12pt, or 0 to accept any size",
+        ));
+}
+
+#[test]
+#[ignore]
 fn lint_reports_real_overflow_alongside_ellipsis_truncation_note() {
     let Some(chrome) = test_chrome_path() else {
         println!(

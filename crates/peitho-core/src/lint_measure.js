@@ -339,10 +339,32 @@
     return truncateSample(sample);
   }
 
+  var LINT_MIN_FONT_SIZE_PROPERTY = "--peitho-lint-min-font-size";
+
+  // Returns the floor in px, null when unset, or NaN when the value is not a
+  // pt/px length (the caller reports the raw value as an error).
+  function parseLintMinFontSizePx(value) {
+    var raw = value.trim();
+    if (raw === "") {
+      return null;
+    }
+    if (raw === "0") {
+      return 0;
+    }
+    var match = /^(\d+(?:\.\d+)?)(pt|px)$/i.exec(raw);
+    if (match === null) {
+      return NaN;
+    }
+    var number = parseFloat(match[1]);
+    return match[2].toLowerCase() === "pt" ? number / 0.75 : number;
+  }
+
   function measureTextFont(slide) {
     var walker = document.createTreeWalker(slide, NodeFilter.SHOW_TEXT);
     var minFontSizePx = null;
     var minFontSample = null;
+    var waiver = null;
+    var waiverError = null;
     var node;
 
     while ((node = walker.nextNode())) {
@@ -370,16 +392,53 @@
       if (!isFinite(size)) {
         continue;
       }
-      if (minFontSizePx === null || size < minFontSizePx) {
-        minFontSizePx = size;
-        minFontSample = sample;
+      var floorValue = style.getPropertyValue(LINT_MIN_FONT_SIZE_PROPERTY);
+      var floorPx = parseLintMinFontSizePx(floorValue);
+      if (floorPx === null) {
+        if (minFontSizePx === null || size < minFontSizePx) {
+          minFontSizePx = size;
+          minFontSample = sample;
+        }
+        continue;
+      }
+      if (isNaN(floorPx)) {
+        if (waiverError === null) {
+          waiverError = floorValue.trim();
+        }
+        continue;
+      }
+      // A node below its own floor always outranks an allowed one, and among
+      // violations the deepest one wins, so a violation is never hidden.
+      var candidate = {
+        fontSizePx: size,
+        sample: sample,
+        thresholdPx: floorPx
+      };
+      if (waiver === null || compareWaivers(candidate, waiver) < 0) {
+        waiver = candidate;
       }
     }
 
     return {
       minFontSizePx: minFontSizePx,
-      minFontSample: minFontSample
+      minFontSample: minFontSample,
+      fontSizeWaiver: waiver,
+      fontSizeWaiverError: waiverError
     };
+  }
+
+  function compareWaivers(a, b) {
+    var deltaA = a.fontSizePx - a.thresholdPx;
+    var deltaB = b.fontSizePx - b.thresholdPx;
+    var violatesA = deltaA < 0;
+    var violatesB = deltaB < 0;
+    if (violatesA !== violatesB) {
+      return violatesA ? -1 : 1;
+    }
+    if (violatesA) {
+      return deltaA - deltaB;
+    }
+    return a.fontSizePx - b.fontSizePx;
   }
 
   function measureSlide(slide, index) {
@@ -396,6 +455,8 @@
       boxHeight: slideRect.height,
       minFontSizePx: textFont.minFontSizePx,
       minFontSample: textFont.minFontSample,
+      fontSizeWaiver: textFont.fontSizeWaiver,
+      fontSizeWaiverError: textFont.fontSizeWaiverError,
       slotOverflows: slotOverflows
     };
   }

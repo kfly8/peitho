@@ -66,6 +66,21 @@ with a short excerpt. The command exits 1 when either warning kind is found and
 0 when the deck is clean. It requires Chrome or Chromium, using the same
 discovery rules as PDF export and `PEITHO_CHROME_PATH`.
 
+Text that is small on purpose, such as a caption or a source line, can lower
+its own floor from the layout CSS with `--peitho-lint-min-font-size`. The
+property inherits, so it can target a slot, one slide through a keyed
+selector, or the whole deck:
+
+```css
+.slot-caption { font-size: 14pt; --peitho-lint-min-font-size: 12pt; }
+[data-slide-key="stats"] .slot-body { --peitho-lint-min-font-size: 16pt; }
+```
+
+Text at or above its floor is reported as a `note:` and does not affect the
+exit code; text below the floor is still a warning that names the floor. The
+value is a length in `pt` or `px`, or `0` to accept any size; any other value
+stops lint with an error naming the slide.
+
 ## `peitho present`
 
 Present generates a volatile cache, starts a local server, launches the browser,
