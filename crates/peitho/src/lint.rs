@@ -19,6 +19,13 @@ const TRUNCATION_HELP: &str =
     "the layout CSS truncates this text with text-overflow; shorten the text or widen the slot if the cut is unintended";
 const FONT_SIZE_HELP: &str =
     "raise the font size in the layout CSS, or move content to another slide instead of shrinking it";
+const FONT_SIZE_WAIVER_PROPERTY: &str = "--peitho-lint-min-font-size";
+const FONT_SIZE_WAIVER_HELP: &str =
+    "raise the font size or lower --peitho-lint-min-font-size in the layout CSS";
+const FONT_SIZE_WAIVED_HELP: &str =
+    "the layout CSS lowers the minimum for this text; remove --peitho-lint-min-font-size if the small size is unintended";
+const FONT_SIZE_WAIVER_VALUE_HELP: &str =
+    "use a length in pt or px, such as 12pt, or 0 to accept any size";
 const LINT_PARSE_HELP: &str =
     "rerun lint and inspect lint.html and chrome-stderr.log in the kept workspace";
 
@@ -37,8 +44,22 @@ struct SlideMeasurement {
     min_font_size_px: Option<f64>,
     #[serde(rename = "minFontSample")]
     min_font_sample: Option<String>,
+    #[serde(default, rename = "fontSizeWaiver")]
+    font_size_waiver: Option<FontSizeWaiverMeasurement>,
+    #[serde(default, rename = "fontSizeWaiverError")]
+    font_size_waiver_error: Option<String>,
     #[serde(default, rename = "slotOverflows")]
     slot_overflows: Vec<SlotOverflowMeasurement>,
+}
+
+/// Text whose computed `--peitho-lint-min-font-size` replaces the 24pt floor.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+struct FontSizeWaiverMeasurement {
+    #[serde(rename = "fontSizePx")]
+    font_size_px: f64,
+    sample: String,
+    #[serde(rename = "thresholdPx")]
+    threshold_px: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -119,6 +140,16 @@ struct FontSizeWarning {
     slide: usize,
     font_size_pt: f64,
     sample: String,
+    /// `Some` when the layout CSS set its own floor and the text is below it.
+    floor_pt: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct FontSizeNote {
+    slide: usize,
+    font_size_pt: f64,
+    floor_pt: f64,
+    sample: String,
 }
 
 pub(crate) fn run(input: PathBuf, stdout: &mut dyn Write) -> miette::Result<i32> {
@@ -143,7 +174,21 @@ pub(crate) fn run(input: PathBuf, stdout: &mut dyn Write) -> miette::Result<i32>
             return Err(crate::keep_workspace_for_error(tmp, err));
         }
     };
+    reject_invalid_font_size_waivers(&measurements)?;
     write_lint_report(&measurements, stdout)
+}
+
+fn reject_invalid_font_size_waivers(measurements: &[SlideMeasurement]) -> miette::Result<()> {
+    for measurement in measurements {
+        if let Some(value) = &measurement.font_size_waiver_error {
+            return Err(miette::miette!(
+                help = FONT_SIZE_WAIVER_VALUE_HELP,
+                "slide {} has an invalid {FONT_SIZE_WAIVER_PROPERTY} value `{value}`",
+                measurement.slide
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn write_chrome_stderr_log(workspace: &Path, chrome_log: &str) -> miette::Result<()> {
@@ -474,14 +519,47 @@ fn round_font_size_pt_for_display(font_size_px: f64) -> f64 {
 }
 
 fn collect_font_size_warnings(measurements: &[SlideMeasurement]) -> Vec<FontSizeWarning> {
+    let mut warnings = Vec::new();
+    for measurement in measurements {
+        if let Some(font_size_px) = measurement.min_font_size_px {
+            let font_size_pt = round_font_size_pt_for_display(font_size_px);
+            if font_size_pt < MIN_FONT_SIZE_PT {
+                warnings.push(FontSizeWarning {
+                    slide: measurement.slide,
+                    font_size_pt,
+                    sample: measurement.min_font_sample.clone().unwrap_or_default(),
+                    floor_pt: None,
+                });
+            }
+        }
+        if let Some(waiver) = &measurement.font_size_waiver {
+            let font_size_pt = round_font_size_pt_for_display(waiver.font_size_px);
+            let floor_pt = round_font_size_pt_for_display(waiver.threshold_px);
+            if font_size_pt < floor_pt {
+                warnings.push(FontSizeWarning {
+                    slide: measurement.slide,
+                    font_size_pt,
+                    sample: waiver.sample.clone(),
+                    floor_pt: Some(floor_pt),
+                });
+            }
+        }
+    }
+    warnings
+}
+
+fn collect_font_size_notes(measurements: &[SlideMeasurement]) -> Vec<FontSizeNote> {
     measurements
         .iter()
         .filter_map(|measurement| {
-            let font_size_pt = round_font_size_pt_for_display(measurement.min_font_size_px?);
-            (font_size_pt < MIN_FONT_SIZE_PT).then(|| FontSizeWarning {
+            let waiver = measurement.font_size_waiver.as_ref()?;
+            let font_size_pt = round_font_size_pt_for_display(waiver.font_size_px);
+            let floor_pt = round_font_size_pt_for_display(waiver.threshold_px);
+            (font_size_pt >= floor_pt).then(|| FontSizeNote {
                 slide: measurement.slide,
                 font_size_pt,
-                sample: measurement.min_font_sample.clone().unwrap_or_default(),
+                floor_pt,
+                sample: waiver.sample.clone(),
             })
         })
         .collect()
@@ -502,6 +580,7 @@ fn write_lint_report(
     let overflow_warnings = collect_overflow_warnings(measurements);
     let (slot_overflow_warnings, truncation_notes) = collect_slot_overflow_warnings(measurements);
     let font_size_warnings = collect_font_size_warnings(measurements);
+    let font_size_notes = collect_font_size_notes(measurements);
     for warning in &overflow_warnings {
         writeln!(
             stdout,
@@ -547,16 +626,44 @@ fn write_lint_report(
         .into_diagnostic()?;
         writeln!(stdout, "   help: {TRUNCATION_HELP}").into_diagnostic()?;
     }
-    for warning in &font_size_warnings {
+    for note in &font_size_notes {
         writeln!(
             stdout,
-            "warning: slide {} has text at {}, below the recommended 24pt: \"{}\"",
-            warning.slide,
-            format_rounded_font_size_pt(warning.font_size_pt),
-            warning.sample
+            "note: slide {} has text at {}, allowed by {FONT_SIZE_WAIVER_PROPERTY}: {}: \"{}\"",
+            note.slide,
+            format_rounded_font_size_pt(note.font_size_pt),
+            format_rounded_font_size_pt(note.floor_pt),
+            note.sample
         )
         .into_diagnostic()?;
-        writeln!(stdout, "   help: {FONT_SIZE_HELP}").into_diagnostic()?;
+        writeln!(stdout, "   help: {FONT_SIZE_WAIVED_HELP}").into_diagnostic()?;
+    }
+    for warning in &font_size_warnings {
+        match warning.floor_pt {
+            Some(floor_pt) => {
+                writeln!(
+                    stdout,
+                    "warning: slide {} has text at {}, below the layout's {FONT_SIZE_WAIVER_PROPERTY} of {}: \"{}\"",
+                    warning.slide,
+                    format_rounded_font_size_pt(warning.font_size_pt),
+                    format_rounded_font_size_pt(floor_pt),
+                    warning.sample
+                )
+                .into_diagnostic()?;
+                writeln!(stdout, "   help: {FONT_SIZE_WAIVER_HELP}").into_diagnostic()?;
+            }
+            None => {
+                writeln!(
+                    stdout,
+                    "warning: slide {} has text at {}, below the recommended 24pt: \"{}\"",
+                    warning.slide,
+                    format_rounded_font_size_pt(warning.font_size_pt),
+                    warning.sample
+                )
+                .into_diagnostic()?;
+                writeln!(stdout, "   help: {FONT_SIZE_HELP}").into_diagnostic()?;
+            }
+        }
     }
 
     let warning_count =
@@ -618,7 +725,25 @@ mod tests {
             box_height: 600.0,
             min_font_size_px: px,
             min_font_sample: sample.map(str::to_owned),
+            font_size_waiver: None,
+            font_size_waiver_error: None,
             slot_overflows: Vec::new(),
+        }
+    }
+
+    fn waived_measurement(
+        slide: usize,
+        font_size_px: f64,
+        threshold_px: f64,
+        sample: &str,
+    ) -> SlideMeasurement {
+        SlideMeasurement {
+            font_size_waiver: Some(FontSizeWaiverMeasurement {
+                font_size_px,
+                sample: sample.to_owned(),
+                threshold_px,
+            }),
+            ..measurement(slide, None, None)
         }
     }
 
@@ -715,6 +840,8 @@ mod tests {
                 box_height: 720.0,
                 min_font_size_px: Some(18.0),
                 min_font_sample: Some("Tiny text".to_owned()),
+                font_size_waiver: None,
+                font_size_waiver_error: None,
                 slot_overflows: Vec::new(),
             }]
         );
@@ -901,6 +1028,107 @@ mod tests {
     }
 
     #[test]
+    fn lint_measurement_payload_deserializes_font_size_waiver_fields() {
+        let payload = encoded(
+            r#"[{"slide":1,"contentWidth":1280.0,"contentHeight":720.0,"boxWidth":1280.0,"boxHeight":720.0,"fontSizeWaiver":{"fontSizePx":18.0,"sample":"Source","thresholdPx":16.0},"fontSizeWaiverError":"none"}]"#,
+        );
+
+        let measurements = parse_lint_measurements(&console_chunk(1, 1, &payload), 1).unwrap();
+
+        assert_eq!(
+            measurements[0].font_size_waiver,
+            Some(FontSizeWaiverMeasurement {
+                font_size_px: 18.0,
+                sample: "Source".to_owned(),
+                threshold_px: 16.0,
+            })
+        );
+        assert_eq!(
+            measurements[0].font_size_waiver_error.as_deref(),
+            Some("none")
+        );
+    }
+
+    #[test]
+    fn waived_text_at_or_above_its_floor_is_a_note_not_a_warning() {
+        // 18.67px = 14pt against a 12pt floor, while the slide's unwaived
+        // text is fine at 32px = 24pt.
+        let measurements = [SlideMeasurement {
+            min_font_size_px: Some(32.0),
+            min_font_sample: Some("Body".to_owned()),
+            ..waived_measurement(3, 18.67, 16.0, "Source: report")
+        }];
+
+        assert!(collect_font_size_warnings(&measurements).is_empty());
+        let notes = collect_font_size_notes(&measurements);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].slide, 3);
+
+        let mut stdout = Vec::new();
+        assert_eq!(write_lint_report(&measurements, &mut stdout).unwrap(), 0);
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            concat!(
+                "note: slide 3 has text at 14pt, allowed by --peitho-lint-min-font-size: 12pt: \"Source: report\"\n",
+                "   help: the layout CSS lowers the minimum for this text; remove --peitho-lint-min-font-size if the small size is unintended\n",
+                "checked 1 slide(s): no warnings\n",
+            )
+        );
+    }
+
+    #[test]
+    fn waived_text_below_its_floor_warns_naming_the_floor() {
+        // 13.33px = 10pt against a 12pt floor.
+        let measurements = [waived_measurement(4, 13.33, 16.0, "Fine print")];
+
+        let warnings = collect_font_size_warnings(&measurements);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].floor_pt, Some(12.0));
+        assert!(collect_font_size_notes(&measurements).is_empty());
+
+        let mut stdout = Vec::new();
+        assert_eq!(write_lint_report(&measurements, &mut stdout).unwrap(), 1);
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            concat!(
+                "warning: slide 4 has text at 10pt, below the layout's --peitho-lint-min-font-size of 12pt: \"Fine print\"\n",
+                "   help: raise the font size or lower --peitho-lint-min-font-size in the layout CSS\n",
+                "checked 1 slide(s): 1 warning(s)\n",
+            )
+        );
+    }
+
+    #[test]
+    fn waiver_decision_uses_the_same_rounded_pt_as_the_message() {
+        // 15.99px rounds to 12pt, the same as the 16px floor, so the message
+        // "12pt allowed by 12pt" must not be a warning.
+        let measurements = [waived_measurement(1, 15.99, 16.0, "Edge")];
+
+        assert!(collect_font_size_warnings(&measurements).is_empty());
+        assert_eq!(collect_font_size_notes(&measurements).len(), 1);
+    }
+
+    #[test]
+    fn invalid_font_size_waiver_value_is_a_hard_error_naming_slide_and_value() {
+        let measurements = [SlideMeasurement {
+            font_size_waiver_error: Some("none".to_owned()),
+            ..measurement(2, None, None)
+        }];
+
+        let err = reject_invalid_font_size_waivers(&measurements).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "slide 2 has an invalid --peitho-lint-min-font-size value `none`"
+        );
+        assert_eq!(
+            crate::diagnostics::report_help(&err).as_deref(),
+            Some(FONT_SIZE_WAIVER_VALUE_HELP)
+        );
+        assert!(reject_invalid_font_size_waivers(&[measurement(1, None, None)]).is_ok());
+    }
+
+    #[test]
     fn overflow_warning_collection_applies_strict_one_pixel_tolerance_per_axis() {
         let measurements = vec![
             SlideMeasurement {
@@ -911,6 +1139,8 @@ mod tests {
                 box_height: 720.0,
                 min_font_size_px: None,
                 min_font_sample: None,
+                font_size_waiver: None,
+                font_size_waiver_error: None,
                 slot_overflows: Vec::new(),
             },
             SlideMeasurement {
@@ -921,6 +1151,8 @@ mod tests {
                 box_height: 720.0,
                 min_font_size_px: None,
                 min_font_sample: None,
+                font_size_waiver: None,
+                font_size_waiver_error: None,
                 slot_overflows: Vec::new(),
             },
             SlideMeasurement {
@@ -931,6 +1163,8 @@ mod tests {
                 box_height: 720.0,
                 min_font_size_px: None,
                 min_font_sample: None,
+                font_size_waiver: None,
+                font_size_waiver_error: None,
                 slot_overflows: Vec::new(),
             },
             SlideMeasurement {
@@ -941,6 +1175,8 @@ mod tests {
                 box_height: 600.1,
                 min_font_size_px: None,
                 min_font_sample: None,
+                font_size_waiver: None,
+                font_size_waiver_error: None,
                 slot_overflows: Vec::new(),
             },
             SlideMeasurement {
@@ -951,6 +1187,8 @@ mod tests {
                 box_height: 720.0,
                 min_font_size_px: None,
                 min_font_sample: None,
+                font_size_waiver: None,
+                font_size_waiver_error: None,
                 slot_overflows: Vec::new(),
             },
         ];
@@ -1245,6 +1483,8 @@ mod tests {
             box_height: 600.2,
             min_font_size_px: Some(24.0),
             min_font_sample: Some("excerpt…".to_owned()),
+            font_size_waiver: None,
+            font_size_waiver_error: None,
             slot_overflows: Vec::new(),
         }];
         let mut stdout = Vec::new();
@@ -1264,6 +1504,8 @@ mod tests {
             box_height: 600.2,
             min_font_size_px: Some(24.0),
             min_font_sample: Some("excerpt…".to_owned()),
+            font_size_waiver: None,
+            font_size_waiver_error: None,
             slot_overflows: Vec::new(),
         }];
         let mut stdout = Vec::new();
@@ -1297,6 +1539,8 @@ mod tests {
             box_height: 600.0,
             min_font_size_px: None,
             min_font_sample: None,
+            font_size_waiver: None,
+            font_size_waiver_error: None,
             slot_overflows: Vec::new(),
         };
         assert_eq!(write_lint_report(&[clean], &mut clean_stdout).unwrap(), 0);
