@@ -15,6 +15,8 @@ const OVERFLOW_TOLERANCE_PX: i64 = 1;
 const OVERFLOW_HELP: &str = "shrink or split the slide content, or adjust the layout CSS";
 const SCROLLABLE_OVERFLOW_HELP: &str =
     "a scrollable region cannot be scrolled in a printed or projected deck, so content past the edge will not be seen";
+const TRUNCATION_HELP: &str =
+    "the layout CSS truncates this text with text-overflow; shorten the text or widen the slot if the cut is unintended";
 const FONT_SIZE_HELP: &str =
     "raise the font size in the layout CSS, or move content to another slide instead of shrinking it";
 const LINT_PARSE_HELP: &str =
@@ -47,6 +49,8 @@ struct SlotOverflowMeasurement {
     overflow_px: Option<i64>,
     #[serde(rename = "slotOverflowValue")]
     overflow_value: Option<OverflowValue>,
+    #[serde(default, rename = "slotOverflowTruncated")]
+    truncated: bool,
     #[serde(rename = "slotName")]
     slot: Option<String>,
 }
@@ -100,6 +104,13 @@ struct SlotOverflowWarning {
     axis: OverflowAxis,
     overflow_px: i64,
     overflow_value: Option<OverflowValue>,
+    slot: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TruncationNote {
+    slide: usize,
+    overflow_px: i64,
     slot: Option<String>,
 }
 
@@ -422,25 +433,36 @@ fn collect_overflow_warnings(measurements: &[SlideMeasurement]) -> Vec<OverflowW
     warnings
 }
 
-fn collect_slot_overflow_warnings(measurements: &[SlideMeasurement]) -> Vec<SlotOverflowWarning> {
+fn collect_slot_overflow_warnings(
+    measurements: &[SlideMeasurement],
+) -> (Vec<SlotOverflowWarning>, Vec<TruncationNote>) {
     let mut warnings = Vec::new();
+    let mut notes = Vec::new();
     for measurement in measurements {
         for overflow in &measurement.slot_overflows {
             let (Some(axis), Some(overflow_px)) = (overflow.axis, overflow.overflow_px) else {
                 continue;
             };
             if overflow_px > OVERFLOW_TOLERANCE_PX {
-                warnings.push(SlotOverflowWarning {
-                    slide: measurement.slide,
-                    axis,
-                    overflow_px,
-                    overflow_value: overflow.overflow_value,
-                    slot: overflow.slot.clone(),
-                });
+                if overflow.truncated {
+                    notes.push(TruncationNote {
+                        slide: measurement.slide,
+                        overflow_px,
+                        slot: overflow.slot.clone(),
+                    });
+                } else {
+                    warnings.push(SlotOverflowWarning {
+                        slide: measurement.slide,
+                        axis,
+                        overflow_px,
+                        overflow_value: overflow.overflow_value,
+                        slot: overflow.slot.clone(),
+                    });
+                }
             }
         }
     }
-    warnings
+    (warnings, notes)
 }
 
 fn round_px(value: f64) -> i64 {
@@ -478,7 +500,7 @@ fn write_lint_report(
     stdout: &mut dyn Write,
 ) -> miette::Result<i32> {
     let overflow_warnings = collect_overflow_warnings(measurements);
-    let slot_overflow_warnings = collect_slot_overflow_warnings(measurements);
+    let (slot_overflow_warnings, truncation_notes) = collect_slot_overflow_warnings(measurements);
     let font_size_warnings = collect_font_size_warnings(measurements);
     for warning in &overflow_warnings {
         writeln!(
@@ -511,6 +533,19 @@ fn write_lint_report(
             .overflow_value
             .map_or(OVERFLOW_HELP, OverflowValue::help);
         writeln!(stdout, "   help: {help}").into_diagnostic()?;
+    }
+    for note in &truncation_notes {
+        let target = match &note.slot {
+            Some(slot) => format!("text in the `{slot}` slot"),
+            None => "text in a container".to_owned(),
+        };
+        writeln!(
+            stdout,
+            "note: slide {} {} is truncated with an ellipsis ({}px hidden)",
+            note.slide, target, note.overflow_px
+        )
+        .into_diagnostic()?;
+        writeln!(stdout, "   help: {TRUNCATION_HELP}").into_diagnostic()?;
     }
     for warning in &font_size_warnings {
         writeln!(
@@ -592,19 +627,21 @@ mod tests {
         overflow_px: Option<i64>,
         slot: Option<&str>,
     ) -> SlotOverflowMeasurement {
-        slot_overflow_with_value(axis, overflow_px, None, slot)
+        slot_overflow_with_value(axis, overflow_px, None, false, slot)
     }
 
     fn slot_overflow_with_value(
         axis: Option<OverflowAxis>,
         overflow_px: Option<i64>,
         overflow_value: Option<OverflowValue>,
+        truncated: bool,
         slot: Option<&str>,
     ) -> SlotOverflowMeasurement {
         SlotOverflowMeasurement {
             axis,
             overflow_px,
             overflow_value,
+            truncated,
             slot: slot.map(str::to_owned),
         }
     }
@@ -699,7 +736,7 @@ mod tests {
     #[test]
     fn lint_measurement_payload_deserializes_slot_overflow_fields() {
         let payload = encoded(
-            r#"[{"slide":1,"contentWidth":1280.0,"contentHeight":720.0,"boxWidth":1280.0,"boxHeight":720.0,"slotOverflows":[{"slotOverflowAxis":"horizontal","slotOverflowPx":7,"slotOverflowValue":"scroll","slotName":"body"},{"slotOverflowAxis":"vertical","slotOverflowPx":14,"slotName":"code"}]}]"#,
+            r#"[{"slide":1,"contentWidth":1280.0,"contentHeight":720.0,"boxWidth":1280.0,"boxHeight":720.0,"slotOverflows":[{"slotOverflowAxis":"horizontal","slotOverflowPx":7,"slotOverflowValue":"scroll","slotName":"body"},{"slotOverflowAxis":"vertical","slotOverflowPx":14,"slotName":"code"},{"slotOverflowAxis":"horizontal","slotOverflowPx":42,"slotOverflowValue":"hidden","slotOverflowTruncated":true,"slotName":"title"}]}]"#,
         );
 
         let measurements = parse_lint_measurements(&console_chunk(1, 1, &payload), 1).unwrap();
@@ -711,9 +748,17 @@ mod tests {
                     Some(OverflowAxis::Horizontal),
                     Some(7),
                     Some(OverflowValue::Scroll),
+                    false,
                     Some("body"),
                 ),
                 slot_overflow(Some(OverflowAxis::Vertical), Some(14), Some("code"),),
+                slot_overflow_with_value(
+                    Some(OverflowAxis::Horizontal),
+                    Some(42),
+                    Some(OverflowValue::Hidden),
+                    true,
+                    Some("title"),
+                ),
             ]
         );
     }
@@ -941,7 +986,7 @@ mod tests {
     }
 
     #[test]
-    fn slot_overflow_warning_collection_handles_axes_slots_and_tolerance() {
+    fn slot_overflow_collection_partitions_truncation_notes_and_applies_tolerance() {
         let measurements = [
             slot_measurement(1, Vec::new()),
             slot_measurement(
@@ -951,12 +996,21 @@ mod tests {
                         Some(OverflowAxis::Horizontal),
                         Some(7),
                         Some(OverflowValue::Auto),
+                        false,
                         Some("code"),
+                    ),
+                    slot_overflow_with_value(
+                        Some(OverflowAxis::Horizontal),
+                        Some(42),
+                        Some(OverflowValue::Hidden),
+                        true,
+                        Some("body"),
                     ),
                     slot_overflow_with_value(
                         Some(OverflowAxis::Vertical),
                         Some(14),
                         Some(OverflowValue::Hidden),
+                        false,
                         None,
                     ),
                 ],
@@ -964,7 +1018,13 @@ mod tests {
             slot_measurement(
                 3,
                 vec![
-                    slot_overflow(Some(OverflowAxis::Horizontal), Some(1), Some("body")),
+                    slot_overflow_with_value(
+                        Some(OverflowAxis::Horizontal),
+                        Some(1),
+                        Some(OverflowValue::Hidden),
+                        true,
+                        Some("title"),
+                    ),
                     slot_overflow(Some(OverflowAxis::Vertical), Some(2), Some("body")),
                 ],
             ),
@@ -977,7 +1037,7 @@ mod tests {
             ),
         ];
 
-        let warnings = collect_slot_overflow_warnings(&measurements);
+        let (warnings, notes) = collect_slot_overflow_warnings(&measurements);
 
         assert_eq!(
             warnings,
@@ -1005,6 +1065,14 @@ mod tests {
                 },
             ]
         );
+        assert_eq!(
+            notes,
+            vec![TruncationNote {
+                slide: 2,
+                overflow_px: 42,
+                slot: Some("body".to_owned()),
+            }]
+        );
     }
 
     #[test]
@@ -1016,6 +1084,7 @@ mod tests {
                     Some(OverflowAxis::Horizontal),
                     Some(8),
                     Some(OverflowValue::Hidden),
+                    false,
                     Some("code"),
                 )],
             ),
@@ -1025,6 +1094,7 @@ mod tests {
                     Some(OverflowAxis::Vertical),
                     Some(14),
                     Some(OverflowValue::Clip),
+                    false,
                     None,
                 )],
             ),
@@ -1048,6 +1118,87 @@ mod tests {
     }
 
     #[test]
+    fn lint_report_renders_truncation_notes_without_counting_them_as_warnings() {
+        let notes_only = [
+            slot_measurement(
+                3,
+                vec![slot_overflow_with_value(
+                    Some(OverflowAxis::Horizontal),
+                    Some(42),
+                    Some(OverflowValue::Hidden),
+                    true,
+                    Some("body"),
+                )],
+            ),
+            slot_measurement(
+                4,
+                vec![slot_overflow_with_value(
+                    Some(OverflowAxis::Horizontal),
+                    Some(9),
+                    Some(OverflowValue::Hidden),
+                    true,
+                    None,
+                )],
+            ),
+        ];
+        let mut stdout = Vec::new();
+
+        let exit_code = write_lint_report(&notes_only, &mut stdout).unwrap();
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            concat!(
+                "note: slide 3 text in the `body` slot is truncated with an ellipsis (42px hidden)\n",
+                "   help: the layout CSS truncates this text with text-overflow; shorten the text or widen the slot if the cut is unintended\n",
+                "note: slide 4 text in a container is truncated with an ellipsis (9px hidden)\n",
+                "   help: the layout CSS truncates this text with text-overflow; shorten the text or widen the slot if the cut is unintended\n",
+                "checked 2 slide(s): no warnings\n",
+            )
+        );
+
+        let mixed = [SlideMeasurement {
+            min_font_size_px: Some(24.0),
+            min_font_sample: Some("Small text".to_owned()),
+            slot_overflows: vec![
+                slot_overflow_with_value(
+                    Some(OverflowAxis::Vertical),
+                    Some(14),
+                    Some(OverflowValue::Hidden),
+                    false,
+                    Some("body"),
+                ),
+                slot_overflow_with_value(
+                    Some(OverflowAxis::Horizontal),
+                    Some(42),
+                    Some(OverflowValue::Hidden),
+                    true,
+                    Some("title"),
+                ),
+            ],
+            ..measurement(5, None, None)
+        }];
+        let mut stdout = Vec::new();
+
+        let exit_code = write_lint_report(&mixed, &mut stdout).unwrap();
+
+        assert_eq!(exit_code, 1);
+        let output = String::from_utf8(stdout).unwrap();
+        let slot_warning = output
+            .find("warning: slide 5 content overflows the `body` slot vertically by 14px")
+            .unwrap();
+        let truncation_note = output
+            .find("note: slide 5 text in the `title` slot is truncated with an ellipsis (42px hidden)")
+            .unwrap();
+        let font_size_warning = output
+            .find("warning: slide 5 has text at 18pt, below the recommended 24pt: \"Small text\"")
+            .unwrap();
+        assert!(slot_warning < truncation_note);
+        assert!(truncation_note < font_size_warning);
+        assert!(output.contains("checked 1 slide(s): 2 warning(s)"));
+    }
+
+    #[test]
     fn lint_report_uses_scrollable_help_for_auto_and_scroll_overflow() {
         let measurements = [slot_measurement(
             12,
@@ -1056,12 +1207,14 @@ mod tests {
                     Some(OverflowAxis::Horizontal),
                     Some(8),
                     Some(OverflowValue::Auto),
+                    false,
                     Some("code"),
                 ),
                 slot_overflow_with_value(
                     Some(OverflowAxis::Vertical),
                     Some(14),
                     Some(OverflowValue::Scroll),
+                    false,
                     Some("code"),
                 ),
             ],

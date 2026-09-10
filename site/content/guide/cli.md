@@ -59,6 +59,8 @@ peitho lint
 ```
 
 Overflow warnings include the slide number, axis, and overflow delta in pixels.
+Text truncated by CSS `text-overflow` is reported as a `note:` and does not
+affect the exit code.
 Font-size warnings appear once per slide and report the smallest size in pt
 with a short excerpt. The command exits 1 when either warning kind is found and
 0 when the deck is clean. It requires Chrome or Chromium, using the same

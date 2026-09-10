@@ -5734,6 +5734,7 @@ Paragraph after heading.
         assert!(LINT_MEASURE_JS.contains("slotOverflowAxis"));
         assert!(LINT_MEASURE_JS.contains("slotOverflowPx"));
         assert!(LINT_MEASURE_JS.contains("slotOverflowValue"));
+        assert!(LINT_MEASURE_JS.contains("slotOverflowTruncated"));
         assert!(LINT_MEASURE_JS.contains("slotName"));
     }
 

@@ -144,6 +144,13 @@
       if (rect.width === 0 && rect.height === 0) {
         return;
       }
+      if (isClippedInside(element, slide)) {
+        // The clipper's scrollWidth/scrollHeight report loss past its end/bottom
+        // edge; loss past its start/top edge is invisible to them, so keep those.
+        bounds.minLeft = Math.min(bounds.minLeft, rect.left);
+        bounds.minTop = Math.min(bounds.minTop, rect.top);
+        return;
+      }
       expandBounds(bounds, rect);
     });
 
@@ -153,6 +160,58 @@
   function clipsOverflow(value) {
     return value === "hidden" || value === "auto" || value === "scroll" ||
       value === "clip";
+  }
+
+  function isClippedInside(element, slide) {
+    var current = element;
+    while (current && current !== slide) {
+      var style = getComputedStyle(current);
+      // Absolute/fixed elements follow offsetParent through their containing-block
+      // chain; a null or out-of-slide offsetParent counts the rect conservatively.
+      var next = (style.position === "absolute" || style.position === "fixed")
+        ? current.offsetParent : current.parentElement;
+      if (!next || !slide.contains(next)) {
+        return false;
+      }
+      if (next !== slide) {
+        var nextStyle = getComputedStyle(next);
+        if (clipsOverflow(nextStyle.overflowX) || clipsOverflow(nextStyle.overflowY)) {
+          return true;
+        }
+      }
+      current = next;
+    }
+    return false;
+  }
+
+  function ownsEllipsizableInlineContent(element) {
+    return Array.prototype.every.call(element.children, function (child) {
+      var childDisplay = getComputedStyle(child).display;
+      if (childDisplay === "none") {
+        return true;
+      }
+      return childDisplay === "inline" &&
+        !/^(img|svg|video|audio|canvas|iframe|object|embed|input|select|textarea|button|math)$/i.test(child.tagName) &&
+        ownsEllipsizableInlineContent(child);
+    });
+  }
+
+  function isTextTruncation(element, style, overflowValue) {
+    if (overflowValue !== "hidden" && overflowValue !== "clip") {
+      return false;
+    }
+    if (style.textOverflow === "clip") {
+      return false;
+    }
+    if (
+      style.display === "flex" ||
+      style.display === "inline-flex" ||
+      style.display === "grid" ||
+      style.display === "inline-grid"
+    ) {
+      return false;
+    }
+    return ownsEllipsizableInlineContent(element);
   }
 
   function isVisuallyHidden(style) {
@@ -195,9 +254,10 @@
   }
 
   function measureSlotOverflows(slide) {
-    var worstByAxis = {
+    var worstByKind = {
       horizontal: null,
-      vertical: null
+      vertical: null,
+      truncation: null
     };
 
     walkDescendants(slide, function (element) {
@@ -207,7 +267,10 @@
       }
 
       function consider(axis, overflowValue, overflowPx) {
-        var worst = worstByAxis[axis];
+        var truncated = axis === "horizontal" &&
+          isTextTruncation(element, style, overflowValue);
+        var kind = truncated ? "truncation" : axis;
+        var worst = worstByKind[kind];
         if (
           !clipsOverflow(overflowValue) ||
           overflowPx <= 0 ||
@@ -215,10 +278,11 @@
         ) {
           return;
         }
-        worstByAxis[axis] = {
+        worstByKind[kind] = {
           slotOverflowAxis: axis,
           slotOverflowPx: overflowPx,
           slotOverflowValue: overflowValue,
+          slotOverflowTruncated: truncated,
           element: element
         };
       }
@@ -247,14 +311,18 @@
         slotOverflowAxis: worst.slotOverflowAxis,
         slotOverflowPx: worst.slotOverflowPx,
         slotOverflowValue: worst.slotOverflowValue,
+        slotOverflowTruncated: worst.slotOverflowTruncated,
         slotName: slotNameFor(worst.element, slide)
       });
     }
-    if (worstByAxis.horizontal !== null) {
-      emit(worstByAxis.horizontal);
+    if (worstByKind.horizontal !== null) {
+      emit(worstByKind.horizontal);
     }
-    if (worstByAxis.vertical !== null) {
-      emit(worstByAxis.vertical);
+    if (worstByKind.vertical !== null) {
+      emit(worstByKind.vertical);
+    }
+    if (worstByKind.truncation !== null) {
+      emit(worstByKind.truncation);
     }
     return overflows;
   }

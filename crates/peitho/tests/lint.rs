@@ -7,6 +7,10 @@ use tempfile::tempdir;
 mod util;
 use util::{test_chrome_path, workspace_root};
 
+const ELLIPSIS_TITLE_CSS: &str =
+    ".slot-title { display: block; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n";
+const OVERLONG_TITLE: &str = "This deliberately overlong presentation title is truncated by the layout with an ellipsis instead of overflowing the title slot";
+
 fn write_default_theme(dir: &Path, overrides: &str) {
     let css_dir = dir.join("css");
     fs::create_dir_all(&css_dir).unwrap();
@@ -54,6 +58,7 @@ fn lint_reports_slide_vertical_overflow() {
     };
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
+    write_default_theme(dir.path(), ".body { overflow: visible; }\n");
     let paragraphs = (1..=80)
         .map(|index| {
             format!(
@@ -71,13 +76,13 @@ fn lint_reports_slide_vertical_overflow() {
         .arg(&deck)
         .assert()
         .code(1)
-        .stdout(predicate::str::contains("warning: slide 1"))
-        .stdout(predicate::str::contains("vertically"))
-        .stdout(predicate::str::contains("px"))
+        .stdout(predicate::str::contains(
+            "warning: slide 1 content overflows the slide box vertically by",
+        ))
         .stdout(predicate::str::contains(
             "has text at 22.5pt, below the recommended 24pt:",
         ))
-        .stdout(predicate::str::contains("checked 1 slide(s): 3 warning(s)"));
+        .stdout(predicate::str::contains("checked 1 slide(s): 2 warning(s)"));
 }
 
 #[test]
@@ -116,6 +121,272 @@ fn lint_reports_clipped_body_and_accepts_healthy_deck() {
         .assert()
         .success()
         .stdout(predicate::str::contains("checked 1 slide(s): no warnings"));
+}
+
+#[test]
+#[ignore]
+fn lint_reports_ellipsis_truncation_as_a_note_without_warning() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping lint_reports_ellipsis_truncation_as_a_note_without_warning: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_default_theme(dir.path(), ELLIPSIS_TITLE_CSS);
+    fs::write(&deck, format!("# {OVERLONG_TITLE}\n")).unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "note: slide 1 text in the `title` slot is truncated with an ellipsis (",
+        ))
+        .stdout(predicate::str::contains("px hidden)"))
+        .stdout(predicate::str::contains(
+            "help: the layout CSS truncates this text with text-overflow; shorten the text or widen the slot if the cut is unintended",
+        ))
+        .stdout(predicate::str::contains("content overflows").not())
+        .stdout(predicate::str::contains("has text at").not())
+        .stdout(predicate::str::contains("checked 1 slide(s): no warnings"));
+}
+
+#[test]
+#[ignore]
+fn lint_reports_real_overflow_alongside_ellipsis_truncation_note() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping lint_reports_real_overflow_alongside_ellipsis_truncation_note: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_default_theme(dir.path(), ELLIPSIS_TITLE_CSS);
+    let bullets = twelve_bullets();
+    fs::write(&deck, format!("# {OVERLONG_TITLE}\n\n{bullets}\n")).unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "warning: slide 1 content overflows the `body` slot vertically by",
+        ))
+        .stdout(predicate::str::contains(
+            "note: slide 1 text in the `title` slot is truncated with an ellipsis (",
+        ))
+        .stdout(predicate::str::contains("content overflows the `title` slot horizontally").not())
+        .stdout(predicate::str::contains("checked 1 slide(s): 2 warning(s)"));
+}
+
+#[test]
+#[ignore]
+fn lint_keeps_inline_block_title_clip_as_overflow_warning() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping lint_keeps_inline_block_title_clip_as_overflow_warning: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_default_theme(
+        dir.path(),
+        ".peitho-slide h1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n",
+    );
+    fs::write(&deck, format!("# {OVERLONG_TITLE}\n")).unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "warning: slide 1 content overflows the `title` slot horizontally by",
+        ))
+        .stdout(predicate::str::contains("note:").not());
+}
+
+#[test]
+#[ignore]
+fn lint_keeps_atomic_inline_child_clip_as_overflow_warning() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping lint_keeps_atomic_inline_child_clip_as_overflow_warning: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_default_theme(
+        dir.path(),
+        ".slot-body p { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .slot-body code { display: inline-block; }\n",
+    );
+    let long_code = "x".repeat(300);
+    fs::write(&deck, format!("# Atomic\n\n`{long_code}`\n")).unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "warning: slide 1 content overflows the `body` slot horizontally by",
+        ))
+        .stdout(predicate::str::contains("note:").not());
+}
+
+#[test]
+#[ignore]
+fn lint_reports_linked_title_truncation_as_a_note_without_slide_box_warning() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping lint_reports_linked_title_truncation_as_a_note_without_slide_box_warning: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_default_theme(dir.path(), ELLIPSIS_TITLE_CSS);
+    fs::write(
+        &deck,
+        format!("# [{OVERLONG_TITLE}](https://example.com/)\n"),
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "note: slide 1 text in the `title` slot is truncated with an ellipsis (",
+        ))
+        .stdout(predicate::str::contains("overflows the slide box").not())
+        .stdout(predicate::str::contains("content overflows").not())
+        .stdout(predicate::str::contains("checked 1 slide(s): no warnings"));
+}
+
+#[test]
+#[ignore]
+fn lint_reports_positioned_escape_from_clipping_wrapper_as_slide_box_overflow() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping lint_reports_positioned_escape_from_clipping_wrapper_as_slide_box_overflow: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let layouts_dir = dir.path().join("layouts");
+    fs::create_dir_all(&layouts_dir).unwrap();
+    fs::write(
+        layouts_dir.join("title-body-code.html"),
+        r#"<section class="peitho-slide">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <div class="body">
+    <div class="badge"></div>
+    <slot name="body" accepts="blocks" arity="0..*"></slot>
+  </div>
+  <figure class="code">
+    <slot name="code" accepts="code" arity="0..1"></slot>
+  </figure>
+  <footer class="footnotes"><slot name="footnotes" accepts="blocks" arity="0..1"></slot></footer>
+</section>"#,
+    )
+    .unwrap();
+    write_default_theme(
+        dir.path(),
+        ".badge { position: absolute; left: -400px; top: 100px; width: 300px; height: 80px; background: red; }\n",
+    );
+    fs::write(&deck, "# Badge\n\nBody text\n").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "warning: slide 1 content overflows the slide box horizontally by 400px",
+        ));
+}
+
+#[test]
+#[ignore]
+fn lint_reports_start_side_clip_inside_body_as_slide_box_overflow() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping lint_reports_start_side_clip_inside_body_as_slide_box_overflow: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_default_theme(dir.path(), ".slot-body p { margin-left: -400px; }\n");
+    fs::write(
+        &deck,
+        "# Pulled left\n\nThis paragraph is pulled out of the body slot and clipped.\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "warning: slide 1 content overflows the slide box horizontally by 328px",
+        ));
+}
+
+#[test]
+#[ignore]
+fn lint_keeps_wrapper_clip_around_block_child_as_overflow_warning() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping lint_keeps_wrapper_clip_around_block_child_as_overflow_warning: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_default_theme(
+        dir.path(),
+        ".body { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n",
+    );
+    let long_word = "x".repeat(320);
+    fs::write(&deck, format!("# Wrapper clip\n\n{long_word}\n")).unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "warning: slide 1 content overflows the `body` slot horizontally by",
+        ))
+        .stdout(predicate::str::contains("note:").not());
 }
 
 #[test]
