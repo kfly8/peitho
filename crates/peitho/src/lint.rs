@@ -6,6 +6,8 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use miette::IntoDiagnostic;
+
+use crate::diagnostics::LabelStyle;
 use serde::Deserialize;
 
 pub(crate) const PEITHO_LINT_DONE: &str = "PEITHO_LINT_DONE";
@@ -152,7 +154,11 @@ struct FontSizeNote {
     sample: String,
 }
 
-pub(crate) fn run(input: PathBuf, stdout: &mut dyn Write) -> miette::Result<i32> {
+pub(crate) fn run(
+    input: PathBuf,
+    stdout: &mut dyn Write,
+    style: LabelStyle,
+) -> miette::Result<i32> {
     let artifacts = crate::build_artifacts(&input)?;
     let tmp = tempfile::tempdir().into_diagnostic()?;
     emit_lint_workspace(tmp.path(), &artifacts)?;
@@ -175,7 +181,7 @@ pub(crate) fn run(input: PathBuf, stdout: &mut dyn Write) -> miette::Result<i32>
         }
     };
     reject_invalid_font_size_waivers(&measurements)?;
-    write_lint_report(&measurements, stdout)
+    write_lint_report(&measurements, stdout, style)
 }
 
 fn reject_invalid_font_size_waivers(measurements: &[SlideMeasurement]) -> miette::Result<()> {
@@ -576,7 +582,9 @@ fn format_rounded_font_size_pt(font_size_pt: f64) -> String {
 fn write_lint_report(
     measurements: &[SlideMeasurement],
     stdout: &mut dyn Write,
+    style: LabelStyle,
 ) -> miette::Result<i32> {
+    let (warning_label, note_label, help_label) = (style.warning(), style.note(), style.help());
     let overflow_warnings = collect_overflow_warnings(measurements);
     let (slot_overflow_warnings, truncation_notes) = collect_slot_overflow_warnings(measurements);
     let font_size_warnings = collect_font_size_warnings(measurements);
@@ -584,7 +592,7 @@ fn write_lint_report(
     for warning in &overflow_warnings {
         writeln!(
             stdout,
-            "warning: slide {} content overflows the slide box {} by {}px (content {}px, box {}px)",
+            "{warning_label}slide {} content overflows the slide box {} by {}px (content {}px, box {}px)",
             warning.slide,
             warning.axis.adverb(),
             warning.overflow_px,
@@ -592,7 +600,7 @@ fn write_lint_report(
             warning.box_px
         )
         .into_diagnostic()?;
-        writeln!(stdout, "   help: {OVERFLOW_HELP}").into_diagnostic()?;
+        writeln!(stdout, "   {help_label}{OVERFLOW_HELP}").into_diagnostic()?;
     }
     for warning in &slot_overflow_warnings {
         let target = match &warning.slot {
@@ -601,17 +609,17 @@ fn write_lint_report(
         };
         writeln!(
             stdout,
-            "warning: slide {} content overflows {} {} by {}px",
+            "{warning_label}slide {} content overflows {} {} by {}px",
             warning.slide,
             target,
             warning.axis.adverb(),
             warning.overflow_px
         )
         .into_diagnostic()?;
-        let help = warning
+        let text = warning
             .overflow_value
             .map_or(OVERFLOW_HELP, OverflowValue::help);
-        writeln!(stdout, "   help: {help}").into_diagnostic()?;
+        writeln!(stdout, "   {help_label}{text}").into_diagnostic()?;
     }
     for note in &truncation_notes {
         let target = match &note.slot {
@@ -620,48 +628,48 @@ fn write_lint_report(
         };
         writeln!(
             stdout,
-            "note: slide {} {} is truncated with an ellipsis ({}px hidden)",
+            "{note_label}slide {} {} is truncated with an ellipsis ({}px hidden)",
             note.slide, target, note.overflow_px
         )
         .into_diagnostic()?;
-        writeln!(stdout, "   help: {TRUNCATION_HELP}").into_diagnostic()?;
+        writeln!(stdout, "   {help_label}{TRUNCATION_HELP}").into_diagnostic()?;
     }
     for note in &font_size_notes {
         writeln!(
             stdout,
-            "note: slide {} has text at {}, allowed by {FONT_SIZE_WAIVER_PROPERTY}: {}: \"{}\"",
+            "{note_label}slide {} has text at {}, allowed by {FONT_SIZE_WAIVER_PROPERTY}: {}: \"{}\"",
             note.slide,
             format_rounded_font_size_pt(note.font_size_pt),
             format_rounded_font_size_pt(note.floor_pt),
             note.sample
         )
         .into_diagnostic()?;
-        writeln!(stdout, "   help: {FONT_SIZE_WAIVED_HELP}").into_diagnostic()?;
+        writeln!(stdout, "   {help_label}{FONT_SIZE_WAIVED_HELP}").into_diagnostic()?;
     }
     for warning in &font_size_warnings {
         match warning.floor_pt {
             Some(floor_pt) => {
                 writeln!(
                     stdout,
-                    "warning: slide {} has text at {}, below the layout's {FONT_SIZE_WAIVER_PROPERTY} of {}: \"{}\"",
+                    "{warning_label}slide {} has text at {}, below the layout's {FONT_SIZE_WAIVER_PROPERTY} of {}: \"{}\"",
                     warning.slide,
                     format_rounded_font_size_pt(warning.font_size_pt),
                     format_rounded_font_size_pt(floor_pt),
                     warning.sample
                 )
                 .into_diagnostic()?;
-                writeln!(stdout, "   help: {FONT_SIZE_WAIVER_HELP}").into_diagnostic()?;
+                writeln!(stdout, "   {help_label}{FONT_SIZE_WAIVER_HELP}").into_diagnostic()?;
             }
             None => {
                 writeln!(
                     stdout,
-                    "warning: slide {} has text at {}, below the recommended 24pt: \"{}\"",
+                    "{warning_label}slide {} has text at {}, below the recommended 24pt: \"{}\"",
                     warning.slide,
                     format_rounded_font_size_pt(warning.font_size_pt),
                     warning.sample
                 )
                 .into_diagnostic()?;
-                writeln!(stdout, "   help: {FONT_SIZE_HELP}").into_diagnostic()?;
+                writeln!(stdout, "   {help_label}{FONT_SIZE_HELP}").into_diagnostic()?;
             }
         }
     }
@@ -795,6 +803,43 @@ mod tests {
         let help = err.help().expect("help must be present").to_string();
         assert!(help.contains("chrome-stderr.log"), "actual help: {help}");
         message
+    }
+
+    #[test]
+    fn colored_report_styles_only_the_labels() {
+        let measurements = vec![
+            measurement(1, Some(24.0), Some("Small text")),
+            slot_measurement(
+                2,
+                vec![slot_overflow_with_value(
+                    Some(OverflowAxis::Horizontal),
+                    Some(42),
+                    None,
+                    true,
+                    Some("body"),
+                )],
+            ),
+        ];
+        let mut stdout = Vec::new();
+        write_lint_report(&measurements, &mut stdout, LabelStyle::COLORED).unwrap();
+        let output = String::from_utf8(stdout).unwrap();
+
+        assert!(
+            output.contains("\x1b[1;33mwarning:\x1b[0m slide 1 has text at 18pt"),
+            "actual: {output}"
+        );
+        assert!(
+            output.contains("\x1b[1;32mnote:\x1b[0m slide 2 text in the `body` slot"),
+            "actual: {output}"
+        );
+        assert!(
+            output.contains("   \x1b[1;33mhelp:\x1b[0m "),
+            "actual: {output}"
+        );
+        assert!(
+            output.ends_with("checked 2 slide(s): 1 warning(s)\n"),
+            "actual: {output}"
+        );
     }
 
     #[test]
@@ -1021,7 +1066,10 @@ mod tests {
         assert_eq!(warnings[0].sample, "Tiny caption");
 
         let mut stdout = Vec::new();
-        assert_eq!(write_lint_report(&measurements, &mut stdout).unwrap(), 1);
+        assert_eq!(
+            write_lint_report(&measurements, &mut stdout, LabelStyle::PLAIN).unwrap(),
+            1
+        );
         assert!(String::from_utf8(stdout).unwrap().contains(
             "warning: slide 1 has text at 23.9pt, below the recommended 24pt: \"Tiny caption\""
         ));
@@ -1065,7 +1113,10 @@ mod tests {
         assert_eq!(notes[0].slide, 3);
 
         let mut stdout = Vec::new();
-        assert_eq!(write_lint_report(&measurements, &mut stdout).unwrap(), 0);
+        assert_eq!(
+            write_lint_report(&measurements, &mut stdout, LabelStyle::PLAIN).unwrap(),
+            0
+        );
         assert_eq!(
             String::from_utf8(stdout).unwrap(),
             concat!(
@@ -1087,7 +1138,10 @@ mod tests {
         assert!(collect_font_size_notes(&measurements).is_empty());
 
         let mut stdout = Vec::new();
-        assert_eq!(write_lint_report(&measurements, &mut stdout).unwrap(), 1);
+        assert_eq!(
+            write_lint_report(&measurements, &mut stdout, LabelStyle::PLAIN).unwrap(),
+            1
+        );
         assert_eq!(
             String::from_utf8(stdout).unwrap(),
             concat!(
@@ -1339,7 +1393,7 @@ mod tests {
         ];
         let mut stdout = Vec::new();
 
-        let exit_code = write_lint_report(&measurements, &mut stdout).unwrap();
+        let exit_code = write_lint_report(&measurements, &mut stdout, LabelStyle::PLAIN).unwrap();
 
         assert_eq!(exit_code, 1);
         let output = String::from_utf8(stdout).unwrap();
@@ -1381,7 +1435,7 @@ mod tests {
         ];
         let mut stdout = Vec::new();
 
-        let exit_code = write_lint_report(&notes_only, &mut stdout).unwrap();
+        let exit_code = write_lint_report(&notes_only, &mut stdout, LabelStyle::PLAIN).unwrap();
 
         assert_eq!(exit_code, 0);
         assert_eq!(
@@ -1418,7 +1472,7 @@ mod tests {
         }];
         let mut stdout = Vec::new();
 
-        let exit_code = write_lint_report(&mixed, &mut stdout).unwrap();
+        let exit_code = write_lint_report(&mixed, &mut stdout, LabelStyle::PLAIN).unwrap();
 
         assert_eq!(exit_code, 1);
         let output = String::from_utf8(stdout).unwrap();
@@ -1459,7 +1513,7 @@ mod tests {
         )];
         let mut stdout = Vec::new();
 
-        let exit_code = write_lint_report(&measurements, &mut stdout).unwrap();
+        let exit_code = write_lint_report(&measurements, &mut stdout, LabelStyle::PLAIN).unwrap();
 
         assert_eq!(exit_code, 1);
         let output = String::from_utf8(stdout).unwrap();
@@ -1489,7 +1543,7 @@ mod tests {
         }];
         let mut stdout = Vec::new();
 
-        write_lint_report(&measurements, &mut stdout).unwrap();
+        write_lint_report(&measurements, &mut stdout, LabelStyle::PLAIN).unwrap();
 
         insta::assert_snapshot!(String::from_utf8(stdout).unwrap());
     }
@@ -1510,7 +1564,7 @@ mod tests {
         }];
         let mut stdout = Vec::new();
 
-        let exit_code = write_lint_report(&measurements, &mut stdout).unwrap();
+        let exit_code = write_lint_report(&measurements, &mut stdout, LabelStyle::PLAIN).unwrap();
 
         assert_eq!(exit_code, 1);
         let output = String::from_utf8(stdout).unwrap();
@@ -1543,7 +1597,10 @@ mod tests {
             font_size_waiver_error: None,
             slot_overflows: Vec::new(),
         };
-        assert_eq!(write_lint_report(&[clean], &mut clean_stdout).unwrap(), 0);
+        assert_eq!(
+            write_lint_report(&[clean], &mut clean_stdout, LabelStyle::PLAIN).unwrap(),
+            0
+        );
         assert_eq!(
             String::from_utf8(clean_stdout).unwrap(),
             "checked 1 slide(s): no warnings\n"

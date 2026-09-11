@@ -102,6 +102,48 @@ fn colors_enabled_by_env() -> bool {
     !no_color && !dumb_term
 }
 
+/// Colored `label: ` prefixes for lint's cargo-shaped report lines, gated
+/// the same way as [`render_diagnostic`] (stream is a TTY, `NO_COLOR` unset,
+/// `TERM` not `dumb`). Lint writes to stdout, so the caller passes its stream.
+#[derive(Clone, Copy)]
+pub(crate) struct LabelStyle {
+    colors: bool,
+}
+
+impl LabelStyle {
+    #[cfg(test)]
+    pub(crate) const PLAIN: Self = Self { colors: false };
+
+    #[cfg(test)]
+    pub(crate) const COLORED: Self = Self { colors: true };
+
+    pub(crate) fn for_stream(stream: &impl IsTerminal) -> Self {
+        Self {
+            colors: stream.is_terminal() && colors_enabled_by_env(),
+        }
+    }
+
+    pub(crate) fn warning(self) -> &'static str {
+        self.pick("warning: ", "\x1b[1;33mwarning:\x1b[0m ")
+    }
+
+    pub(crate) fn note(self) -> &'static str {
+        self.pick("note: ", "\x1b[1;32mnote:\x1b[0m ")
+    }
+
+    pub(crate) fn help(self) -> &'static str {
+        self.pick("help: ", "\x1b[1;33mhelp:\x1b[0m ")
+    }
+
+    fn pick(self, plain: &'static str, styled: &'static str) -> &'static str {
+        if self.colors {
+            styled
+        } else {
+            plain
+        }
+    }
+}
+
 pub(crate) struct TerminalStyle {
     colors: bool,
     width: usize,

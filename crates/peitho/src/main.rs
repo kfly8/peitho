@@ -931,7 +931,8 @@ fn run() -> miette::Result<()> {
         }
         Command::Lint { input } => {
             let mut stdout = std::io::stdout();
-            let code = lint::run(input, &mut stdout)?;
+            let style = diagnostics::LabelStyle::for_stream(&stdout);
+            let code = lint::run(input, &mut stdout, style)?;
             if code != 0 {
                 std::process::exit(code);
             }
