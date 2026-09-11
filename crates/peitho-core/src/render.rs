@@ -1888,6 +1888,7 @@ pub fn render_present_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> Strin
         peitho.installSwipeNavigation({ root, window });
         peitho.installFullscreenShortcut({ window, document });
         const shell = await peitho.mountPresentShell({ root });
+        if (shell.manifest) document.title = shell.manifest.title;
         if (typeof shell.adoptTimerState !== 'function') {
           throw new Error("shell bundle does not provide adoptTimerState; run npm run build or provide a current --shell bundle");
         }
@@ -4880,6 +4881,7 @@ Paragraph after heading.
         assert!(html.contains("installCloseOnEscape(window)"));
         assert!(html.contains("fetchOk('notes.json')"));
         assert!(html.contains("await peitho.mountPresentShell({ root })"));
+        assert!(html.contains("if (shell.manifest) document.title = shell.manifest.title;"));
         assert!(html.contains("typeof shell.adoptTimerState !== 'function'"));
         assert!(html.contains(
             r#""shell bundle does not provide adoptTimerState; run npm run build or provide a current --shell bundle""#

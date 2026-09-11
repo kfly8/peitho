@@ -697,6 +697,7 @@ var PreviewShellController = class {
         })
       );
       this.manifest = manifest;
+      this.doc.title = manifest.title;
       this.root.replaceChildren();
       for (const view of pending) {
         this.root.appendChild(view.tile);
