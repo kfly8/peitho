@@ -165,6 +165,7 @@ it("renders the redesigned presenter shell and starts timer from the playpause b
   });
   views.push(view);
 
+  expect(document.title).toBe("");
   expect(root.querySelector('[data-peitho-presenter="current"] .peitho-slide')).not.toBeNull();
   expect(
     root.querySelector<HTMLElement>(

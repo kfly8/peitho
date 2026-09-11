@@ -160,6 +160,16 @@ function mockChannel() {
   return channel;
 }
 
+it("sets the document title from the manifest", async () => {
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+
+  await mountForTest(root);
+
+  expect(document.title).toBe("Preview Demo");
+});
+
 it("computes preview grid columns from root width and clamps to one", () => {
   expect(previewGridColumnCount(1044)).toBe(3);
   expect(previewGridColumnCount(367)).toBe(1);
