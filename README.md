@@ -75,7 +75,11 @@ enum Phase { Parsed, Mapped, Checked, Rendered }
 
 ![peitho preview prints the URL it is serving on, plus a rebuild line on every save](site/static/guide-shots/cli-preview.png)
 
-Press `o` to flip between the single-slide view and a tile overview of the whole deck, or move one way at a time: `Esc` returns to the overview, `Enter` opens the selected tile. Arrows walk the grid, and clicking a tile opens it too. The single-slide view keeps a filmstrip of every slide on the left (Up/Down walk it, and a click on a thumbnail jumps to it) and shows the current slide's speaker notes in a panel below the slide, headed by the slide's position (`3 / 25`), so a note can be checked without starting a presentation. Thumbnails and overview tiles carry their slide number in the bottom-left corner:
+Press `o` to flip between the single-slide view and a tile overview of the whole deck, or move one way at a time: `Esc` returns to the overview, `Enter` opens the selected tile. Arrows walk the grid, and clicking a tile opens it too. The single-slide view keeps a filmstrip of every slide on the left (Up/Down walk it, and a click on a thumbnail jumps to it) and shows the current slide's speaker notes in an editable panel below the slide, headed by the slide's position (`3 / 25`), so a note can be checked and fixed without leaving the browser.
+
+Type into the notes panel and the note autosaves on blur, slide changes, and page exit, written back into the deck's Markdown as the slide's `<!-- ... -->` comment (or into the file the slide is included from). While typing, only PageUp and PageDown change slides, and `Esc` leaves the panel before a second `Esc` opens the overview. The [CLI guide](https://peitho.gosu.ke/guide/cli/#editing-speaker-notes-in-preview) spells out exactly what a save writes.
+
+Thumbnails and overview tiles carry their slide number in the bottom-left corner:
 
 ![The preview overview: every slide as a tile in a scrollable grid](site/static/guide-shots/preview-overview.png)
 
@@ -131,7 +135,7 @@ A slide's page settings are one `<!-- { ... } -->` JSON comment (at most one per
 
 ### Speaker notes
 
-Any non-JSON HTML comment in a slide body becomes that slide's speaker note (Marp / [k1LoW/deck](https://github.com/k1LoW/deck)-style); multiple comments are joined with a blank line. Notes ride only into the presenter view — `dist/` never contains them (the publish contamination check enforces this).
+Any non-JSON HTML comment in a slide body becomes that slide's speaker note (Marp / [k1LoW/deck](https://github.com/k1LoW/deck)-style); multiple comments are joined with a blank line. Notes ride into the presenter view and the preview notes panel, where they can be edited — `dist/` never contains them (the publish contamination check enforces this).
 
 ### Images
 
