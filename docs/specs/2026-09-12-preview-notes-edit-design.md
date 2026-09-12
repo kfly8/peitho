@@ -118,8 +118,10 @@ longer parsed back to the same deck):
   block. The unchecked splice is private, so no caller can skip the check.
 - A leading BOM is stripped before splicing (spans are relative to the
   stripped text, as in `parse_markdown`) and re-added to the result.
-- Line endings follow the file: if the source contains `\r\n`, inserted
-  newlines are `\r\n`.
+- Line endings follow the note's own line (revised in Task 6): an inserted
+  comment takes the terminator of the note line it replaces, or of the line
+  it is appended after; a line with no terminator (the slide ends the file)
+  falls back to `\r\n` when the slide contains one, else `\n`.
 - Rejected with a line-numbered `BuildError` and help: text containing
   `-->` (cannot be represented in an HTML comment) and text whose trimmed
   form starts with `{` (the parser would read it as a page settings comment
@@ -170,17 +172,21 @@ review):
   `origin_span_to_range` skips a leading BOM in the origin text it is given
   and offsets the range past it, so the CLI indexes the raw file bytes.
 - The rewritten slide is taken from
-  `rewritten[combined.start..slide.source_span.end +
-  rewritten.len() - combined_source.len()]` (add before subtracting, the rewrite
-  may shrink the source): a leading synthetic byte is never touched by the
-  rewrite and is skipped, while trailing synthetic bytes (a generated terminator
-  and a generated blank line) that the rewrite leaves in place become real bytes
-  in the origin (a one-time whitespace normalization; the next expansion then
-  needs no synthetic bytes there). Because the combined source mixes files, the
-  CLI converts the new slide bytes to the origin's line ending (CRLF when the
-  origin contains `\r\n`, LF otherwise), and a save whose rewritten combined
-  source equals the input writes nothing at all (this is what keeps a save of
-  unchanged text a no-op even when trailing synthetic bytes exist).
+  `rewritten[combined.start..slide.source_span.end + rewritten.len() -
+  combined_source.len()]` (add before subtracting, the rewrite may shrink the
+  source): a leading synthetic byte is never touched by the rewrite and is
+  skipped, while trailing synthetic bytes (a generated terminator and a
+  generated blank line) that the rewrite leaves in place become real bytes in
+  the origin (a one-time whitespace normalization; the next expansion then needs
+  no synthetic bytes there). `rewrite_note` picks the terminator for inserted
+  lines from the replaced note line, or the line the comment is appended after,
+  falling back to the slide's own bytes (revised 2026-09-13 in Task 6 review),
+  so an LF include inside a CRLF deck keeps LF; the CLI converts only bare LF
+  bytes (the materialized synthetic ones) to CRLF when the origin is
+  consistently CRLF and leaves mixed-ending files exactly as produced. A save
+  whose rewritten slide equals the origin's current bytes writes nothing at all
+  (this is what keeps a save of unchanged text a no-op even when trailing
+  synthetic bytes exist).
 
 For a deck without includes the map is the identity and the origin file is
 the deck itself.
@@ -217,8 +223,8 @@ to the server:
    comments, so running it on origin text would reject every save on a deck
    with includes.
 5. Write atomically (temp file + rename in the same directory; `write_atomic`
-   already exists in `server.rs`). A mutex in the writer serializes
-   concurrent saves.
+   already exists in `server.rs`). The server serializes concurrent
+   saves (revised in Task 5).
 
 The watch loop already observes the deck and included files, so the save
 causes a normal rebuild and generation bump. Nothing else triggers reloads.
@@ -237,7 +243,9 @@ CORS "simple request" that any page the author has open could fire at
 preflight that the server answers with 405. `key` deserializes as a
 `SlideKey`, so malformed keys are rejected before any deck work. The server
 holds a lock around the writer call, so saves are serialized by construction
-rather than by a convention inside the writer. `write_atomic` follows an
+rather than by a convention inside the writer, and runs the call on a spawned
+thread like the long-poll handlers so a save never stalls `/sync` or static
+fetches on the single preview listener. `write_atomic` follows an
 existing symlink to its canonical target, keeps the target's permissions, and
 removes its staging file when the rename fails, so a symlinked or 0600 deck
 survives a save unchanged in shape.
@@ -326,7 +334,8 @@ flush, and the state transitions live in the preview shell.
 - **Skipped slides:** editable like any other.
 - **Concurrent saves:** serialized by the writer mutex; the watch debounce
   coalesces the rebuilds.
-- **CRLF files:** inserted line endings match the file.
+- **CRLF files:** inserted line endings match the replaced or preceding
+  line (falling back to the slide's bytes).
 - **BOM:** stripped before offsets are used, restored on write.
 - **`.peitho/preview-cache/`, `dist/`, `notes.json`:** unchanged in shape.
   Notes still never enter `dist/`.
