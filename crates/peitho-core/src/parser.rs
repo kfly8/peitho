@@ -13,7 +13,7 @@ use crate::{
     domain::{
         AspectRatio, CodeImageCommand, CodeImageRenderer, CodeImagesConfig, ContainerCodeLanguage,
         EmbedMode, EmbedOptions, ExplicitSlot, FootnoteEntry, FragmentKind, RawImagePath,
-        Resolution, RevealSpan, SlideKey, SlotName, SourceFragment,
+        Resolution, RevealSpan, SlideKey, SlotName, SourceFragment, SourceSpan,
     },
     emphasis,
     error::{BuildError, ErrorKind, Result},
@@ -461,12 +461,6 @@ impl FootnoteCapture {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SlideRange {
-    start: usize,
-    end: usize,
-}
-
 struct RawFrontmatter {
     line: usize,
     yaml: String,
@@ -635,7 +629,7 @@ pub(crate) fn parse_markdown(
     Ok(Deck::parsed(settings, slides))
 }
 
-fn split_slide_ranges(source: &str, content_start: usize) -> Result<Vec<SlideRange>> {
+fn split_slide_ranges(source: &str, content_start: usize) -> Result<Vec<SourceSpan>> {
     let mut ranges = Vec::new();
     let mut start = content_start;
     let mut block_depth = 0usize;
@@ -661,7 +655,7 @@ fn split_slide_ranges(source: &str, content_start: usize) -> Result<Vec<SlideRan
             continue;
         }
         if matches!(event, Event::Rule) && block_depth == 0 {
-            ranges.push(SlideRange {
+            ranges.push(SourceSpan {
                 start,
                 end: global_start,
             });
@@ -669,7 +663,7 @@ fn split_slide_ranges(source: &str, content_start: usize) -> Result<Vec<SlideRan
         }
     }
 
-    ranges.push(SlideRange {
+    ranges.push(SourceSpan {
         start,
         end: source.len(),
     });
@@ -2127,7 +2121,7 @@ fn close_container(
 
 fn parse_slide(
     source: &str,
-    range: SlideRange,
+    range: SourceSpan,
     index: usize,
     highlighter: &Highlighter,
     code_images: &CodeImagesConfig,
@@ -2146,7 +2140,7 @@ fn parse_slide(
     // Stack of open fenced divs. Each frame owns the children collected so far
     // for that group; the top of stack is the current push target.
     let mut div_stack: Vec<(usize, DivOpen, Vec<SourceFragment>)> = Vec::new();
-    let mut note_fragments: Vec<String> = Vec::new();
+    let mut notes: Vec<(String, SourceSpan)> = Vec::new();
     let mut block: Option<OpenBlock> = None;
     let mut footnotes = FootnoteAccumulator::default();
     let mut footnote_capture: Option<FootnoteCapture> = None;
@@ -2156,7 +2150,7 @@ fn parse_slide(
     // for a multi-line comment). We buffer them between Start(HtmlBlock)/End
     // and analyse the joined text once, so a multi-line `<!-- ... -->` isn't
     // mistaken for an "unsupported html" per line.
-    let mut html_buf: Option<(String, usize)> = None;
+    let mut html_buf: Option<(String, usize, SourceSpan)> = None;
 
     for (event, local_range) in Parser::new_ext(slice, parser_options()).into_offset_iter() {
         let global_start = range.start + local_range.start;
@@ -2394,7 +2388,7 @@ fn parse_slide(
                 ));
             }
             Event::Html(html) | Event::InlineHtml(html) => {
-                if let Some((buf, _)) = html_buf.as_mut() {
+                if let Some((buf, _, _)) = html_buf.as_mut() {
                     buf.push_str(html.as_ref());
                 } else {
                     // InlineHtml (or a stray Html outside a HtmlBlock): process
@@ -2415,7 +2409,11 @@ fn parse_slide(
                         &mut skip_flag,
                         &mut page_number_hidden_flag,
                         &mut page_settings_line,
-                        &mut note_fragments,
+                        SourceSpan {
+                            start: global_start,
+                            end: global_end,
+                        },
+                        &mut notes,
                     )?;
                 }
             }
@@ -2845,10 +2843,17 @@ fn parse_slide(
                 Some(OpenBlock::Heading { .. }) | None => {}
             },
             Event::Start(Tag::HtmlBlock) => {
-                html_buf = Some((String::new(), line));
+                html_buf = Some((
+                    String::new(),
+                    line,
+                    SourceSpan {
+                        start: global_start,
+                        end: global_end,
+                    },
+                ));
             }
             Event::End(TagEnd::HtmlBlock) => {
-                if let Some((buf, start_line)) = html_buf.take() {
+                if let Some((buf, start_line, span)) = html_buf.take() {
                     let ctx = explicit_key.clone();
                     process_html_chunk(
                         &buf,
@@ -2865,7 +2870,8 @@ fn parse_slide(
                         &mut skip_flag,
                         &mut page_number_hidden_flag,
                         &mut page_settings_line,
-                        &mut note_fragments,
+                        span,
+                        &mut notes,
                     )?;
                 }
             }
@@ -2957,6 +2963,7 @@ fn parse_slide(
             (key, key_source)
         });
 
+    let (note_fragments, note_spans): (Vec<_>, Vec<_>) = notes.into_iter().unzip();
     let notes = if note_fragments.is_empty() {
         None
     } else {
@@ -2967,6 +2974,7 @@ fn parse_slide(
         slide: ParsedSlide {
             index,
             source_index: index,
+            source_span: range,
             key,
             key_source,
             layout_request,
@@ -2978,6 +2986,7 @@ fn parse_slide(
                 .map(|flag| flag.enabled)
                 .unwrap_or(false),
             notes,
+            note_spans,
         },
         section: section_marker,
         draft: draft_flag,
@@ -3197,7 +3206,8 @@ fn process_html_chunk(
     skip_flag: &mut Option<bool>,
     page_number_hidden_flag: &mut Option<PageFlag>,
     page_settings_line: &mut Option<usize>,
-    note_fragments: &mut Vec<String>,
+    span: SourceSpan,
+    notes: &mut Vec<(String, SourceSpan)>,
 ) -> Result<()> {
     if let Some(settings) = parse_page_comment(raw, line)
         .map_err(|err| attach_slide_context(err, index, explicit_key_ctx.as_ref(), fragments))?
@@ -3259,7 +3269,7 @@ fn process_html_chunk(
     }
     if is_html_comment(raw) {
         if let Some(text) = extract_html_comment_body(raw) {
-            note_fragments.push(text);
+            notes.push((text, span));
         }
         return Ok(());
     }
@@ -3661,7 +3671,7 @@ fn derive_key_from_fragments(fragments: &[SourceFragment], index: usize) -> Slid
 mod tests {
     use super::*;
     use crate::{
-        domain::{AspectRatio, EmbedMode, EmbedOptions, FragmentKind, RevealSpan},
+        domain::{AspectRatio, EmbedMode, EmbedOptions, FragmentKind, RevealSpan, SourceSpan},
         error::ErrorKind,
         phase::{KeySource, PageNumberFormat},
     };
@@ -6083,6 +6093,45 @@ After list
     }
 
     #[test]
+    fn parsed_slide_records_html_block_and_inline_note_spans() {
+        let source =
+            "# Title\n\n<!--\nblock note\n-->\n\nText <!-- inline note --> more\n\n---\n# Second\n";
+        let separator_start = source.find("\n---").unwrap() + 1;
+        let slide = parse_first_slide(source);
+
+        assert_eq!(
+            slide.source_span,
+            SourceSpan {
+                start: 0,
+                end: separator_start
+            }
+        );
+        assert_eq!(slide.note_spans.len(), 2);
+        assert_eq!(
+            &source[slide.note_spans[0].start..slide.note_spans[0].end],
+            "<!--\nblock note\n-->\n"
+        );
+        assert_eq!(
+            &source[slide.note_spans[1].start..slide.note_spans[1].end],
+            "<!-- inline note -->"
+        );
+        assert_eq!(slide.notes.as_deref(), Some("block note\n\ninline note"));
+    }
+
+    #[test]
+    fn page_settings_and_empty_comments_do_not_get_note_spans() {
+        let source = "<!-- {\"key\":\"intro\"} -->\n\n<!-- -->\n\n<!---->\n\n<!-- real note -->";
+        let slide = parse_first_slide(source);
+
+        assert_eq!(slide.note_spans.len(), 1);
+        assert_eq!(
+            &source[slide.note_spans[0].start..slide.note_spans[0].end],
+            "<!-- real note -->"
+        );
+        assert_eq!(slide.notes.as_deref(), Some("real note"));
+    }
+
+    #[test]
     fn parses_layout_request_from_page_settings_comment() {
         let deck = parse_markdown(
             "<!-- {\"key\":\"cover\",\"layout\":\"cover\"} -->\n# Title",
@@ -7510,7 +7559,7 @@ After list
         let source = "---\ntime: 15m\n---\n# Details";
         let err = parse_slide(
             source,
-            SlideRange {
+            SourceSpan {
                 start: 0,
                 end: source.len(),
             },

@@ -732,6 +732,14 @@ pub enum FragmentKind<S = RawImagePath> {
     },
 }
 
+/// A half-open byte range (`start..end`) into the source string handed to the
+/// parser, after include expansion and BOM stripping, with frontmatter bytes included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
 /// Reveal step coverage for one source fragment.
 ///
 /// `start` is the 1-based reveal step where this fragment begins. `len` is
