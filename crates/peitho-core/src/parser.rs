@@ -520,6 +520,51 @@ fn leading_frontmatter_start_line(source: &str) -> Option<usize> {
         .map(|(offset, _)| line_for_offset(source, offset))
 }
 
+/// A parsed deck whose code-image fences were not transformed.
+///
+/// It exposes only what the preview notes writer needs: slide keys, source spans, note spans, and
+/// settings. It cannot enter mapping or rendering, which require the deck produced by
+/// [`crate::parse_deck_and_transform`].
+///
+/// ```compile_fail
+/// use peitho_core::{dispatch_by_convention, Layouts, UntransformedDeck};
+///
+/// fn untransformed_deck_cannot_enter_mapping(deck: UntransformedDeck, layouts: &Layouts) {
+///     let _ = dispatch_by_convention(deck, layouts);
+/// }
+/// ```
+pub struct UntransformedDeck(Deck<Parsed>);
+
+impl UntransformedDeck {
+    /// Returns the parsed slides.
+    pub fn parsed_slides(&self) -> &[ParsedSlide] {
+        self.0.parsed_slides()
+    }
+
+    /// Returns the deck settings.
+    pub fn settings(&self) -> &DeckSettings {
+        self.0.settings()
+    }
+}
+
+/// Parses a deck without transforming code images, so no code-image renderer can run.
+///
+/// This path also skips transform-phase validation, including embed URL and `mode=` rules and
+/// external-command failures, so a deck it accepts may still fail `peitho build`.
+///
+/// `source` must be the include-expanded text. Returned spans index that text after one leading
+/// byte-order mark (BOM) is stripped, as `parse_markdown` does.
+///
+/// The normal build pipeline uses [`crate::parse_deck_and_transform`] to parse the deck and
+/// transform its code images.
+pub fn parse_deck(
+    source: &str,
+    frontmatter: ParsedFrontmatter,
+    highlighter: &Highlighter,
+) -> Result<UntransformedDeck> {
+    parse_markdown(source, frontmatter, highlighter).map(UntransformedDeck)
+}
+
 /// Return author-referenced image paths without transforming code-image or embed fragments.
 pub fn referenced_image_paths(
     source: &str,

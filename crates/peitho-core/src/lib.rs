@@ -46,7 +46,9 @@ pub use mapping::{
 };
 pub use math::{MathAssets, MathFontAsset};
 pub use notes::{notes_json, Notes};
-pub use parser::{parse_frontmatter, referenced_image_paths, ParsedFrontmatter};
+pub use parser::{
+    parse_deck, parse_frontmatter, referenced_image_paths, ParsedFrontmatter, UntransformedDeck,
+};
 pub use phase::{
     require_checked_for_render, resolve_image_paths, AssetPath, Checked, Deck, DeckLang,
     ImageRequest, Mapped, Rendered,

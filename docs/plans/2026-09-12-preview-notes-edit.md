@@ -382,6 +382,15 @@ existing `parse_markdown`, keep `parse_markdown` `pub(crate)`, and re-export
 `parse_deck` from `lib.rs`. Leave `parse_deck_and_transform` unchanged for the
 normal build pipeline.
 
+**Revision (2026-09-13, PR for this task).** Review found that a public
+`Deck<Parsed>` produced without the transform is indistinguishable from the
+transformed deck the public mapping chain accepts, so an outside caller could
+render a deck whose declared renderers never ran. `parse_deck` therefore
+returns `UntransformedDeck`, a wrapper exposing only `parsed_slides()` and
+`settings()` with no way to reach `Deck<Parsed>` (pinned by a `compile_fail`
+doctest). Task 6 uses `parsed_slides()` exactly as written and is otherwise
+unaffected; `LoadedDeckSource::translate` is generic over the result type.
+
 **Verification.**
 
 ```sh
