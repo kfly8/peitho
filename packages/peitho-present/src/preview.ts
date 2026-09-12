@@ -58,9 +58,18 @@ type CanvasDimensions = {
   height: number;
 };
 
+type PreviewDraft = {
+  key: string;
+  text?: string;
+  selectionStart: number;
+  selectionEnd: number;
+  focused: boolean;
+};
+
 type PreviewState = {
   mode: PreviewMode;
   index: number;
+  draft?: PreviewDraft;
 };
 
 const PREVIEW_STATE_KEY = "peitho:preview-state";
@@ -73,6 +82,22 @@ export const PREVIEW_STRIP_WIDTH = 200;
 const STRIP_PADDING = 12;
 const STRIP_GAP = 10;
 const NO_NOTES_PLACEHOLDER = "No notes for this slide.";
+
+function isPreviewDraft(value: unknown): value is PreviewDraft {
+  if (typeof value !== "object" || value === null) return false;
+  const draft = value as Partial<PreviewDraft>;
+  return (
+    typeof draft.key === "string" &&
+    (draft.text === undefined || typeof draft.text === "string") &&
+    typeof draft.selectionStart === "number" &&
+    Number.isFinite(draft.selectionStart) &&
+    draft.selectionStart >= 0 &&
+    typeof draft.selectionEnd === "number" &&
+    Number.isFinite(draft.selectionEnd) &&
+    draft.selectionEnd >= 0 &&
+    typeof draft.focused === "boolean"
+  );
+}
 
 export function previewGridColumnCount(rootWidth: number): number {
   const columns = Math.floor(
@@ -186,6 +211,8 @@ class PreviewShellController implements PreviewShell {
   private readonly notesPositionText: HTMLSpanElement;
   private notesTextareaKey: string | null = null;
   private flushChain: Promise<boolean> = Promise.resolve(true);
+  private flushesInFlight = 0;
+  private transitionSequence = 0;
   private readonly strip: HTMLElement;
   private readonly tileClickGuardCleanups: Array<() => void> = [];
   private fontScopeCleanup: (() => void) | null = null;
@@ -213,6 +240,12 @@ class PreviewShellController implements PreviewShell {
   private readonly onResize = (): void => this.applyLayout();
   private readonly onNotesBlur = (): void => {
     void this.flushNotes();
+  };
+  private readonly onPageHide = (): void => {
+    this.saveState();
+    const key = this.notesTextareaKey;
+    const text = this.notesTextarea.value;
+    void this.doFlush(key, text, true);
   };
 
   constructor(options: PreviewShellOptions) {
@@ -248,6 +281,7 @@ class PreviewShellController implements PreviewShell {
     this.bus.addEventListener("peitho:navigate", this.onNavigate);
     this.bus.addEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.win.addEventListener("resize", this.onResize);
+    this.win.addEventListener("pagehide", this.onPageHide);
   }
 
   async load(): Promise<void> {
@@ -290,6 +324,8 @@ class PreviewShellController implements PreviewShell {
       this.selectedIndex = restoredIndex;
       this.mode = restored?.mode ?? DEFAULT_PREVIEW_MODE;
       this.applyLayout();
+      if (this.notesTextareaKey === null) this.renderNotes();
+      this.restoreDraft(restored?.draft);
       this.dispatchSlideChange(null);
     } catch (error) {
       this.clearCanvasRootProperties();
@@ -303,30 +339,36 @@ class PreviewShellController implements PreviewShell {
     this.navigateToTarget(to);
   }
 
-  private flushNotes(keepalive = false): Promise<boolean> {
+  private flushNotes(): Promise<boolean> {
     const key = this.notesTextareaKey;
     const text = this.notesTextarea.value;
+    this.flushesInFlight += 1;
     // The two-arm then keeps the chain alive if doFlush ever rejects.
-    this.flushChain = this.flushChain.then(
-      () => this.doFlush(key, text, keepalive),
-      () => this.doFlush(key, text, keepalive)
-    );
+    this.flushChain = this.flushChain
+      .then(
+        () => this.doFlush(key, text, false),
+        () => this.doFlush(key, text, false)
+      )
+      .finally(() => {
+        this.flushesInFlight -= 1;
+      });
     return this.flushChain;
   }
 
   private async doFlush(key: string | null, text: string, keepalive: boolean): Promise<boolean> {
     if (key === null) return true;
-    const dirty = text !== (this.notes.notes[key] ?? "");
-    if (!dirty) {
+    if (!this.isDirty(key, text)) {
       this.notesStatus.textContent = "";
       return true;
     }
 
     try {
+      const requestBody = JSON.stringify({ key, text });
+      if (keepalive && new TextEncoder().encode(requestBody).length > 60_000) keepalive = false; // Chrome rejects in-flight keepalive bodies over 64 KiB.
       const response = await this.fetcher("/notes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key, text }),
+        body: requestBody,
         keepalive
       });
       if (response.ok) {
@@ -359,19 +401,30 @@ class PreviewShellController implements PreviewShell {
   }
 
   saveState(): void {
-    const index = this.clampIndex(this.selectedIndex >= 0 ? this.selectedIndex : this.currentIndex);
-    try {
-      this.storage?.setItem(PREVIEW_STATE_KEY, JSON.stringify({ mode: this.mode, index }));
-    } catch (error) {
-      this.log.error(`Failed to save preview state: ${String(error)}`);
+    if (!this.isLoaded()) return;
+    const state: PreviewState = { mode: this.mode, index: this.stateIndex() };
+    const focused = this.doc.activeElement === this.notesTextarea;
+    const dirty = !this.notesSettled();
+    if (this.notesTextareaKey !== null && (dirty || focused)) {
+      const draft: PreviewDraft = {
+        key: this.notesTextareaKey,
+        selectionStart: this.notesTextarea.selectionStart,
+        selectionEnd: this.notesTextarea.selectionEnd,
+        focused
+      };
+      if (dirty) draft.text = this.notesTextarea.value;
+      state.draft = draft;
     }
+    this.writeState(state);
   }
 
   destroy(): void {
+    this.transitionSequence += 1;
     this.notesTextarea.removeEventListener("blur", this.onNotesBlur);
     this.bus.removeEventListener("peitho:navigate", this.onNavigate);
     this.bus.removeEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.win.removeEventListener("resize", this.onResize);
+    this.win.removeEventListener("pagehide", this.onPageHide);
     while (this.tileClickGuardCleanups.length > 0) this.tileClickGuardCleanups.pop()?.();
     this.fontScopeCleanup?.();
     this.fontScopeCleanup = null;
@@ -412,8 +465,7 @@ class PreviewShellController implements PreviewShell {
     this.tileClickGuardCleanups.push(() => clickGuard.destroy());
     tile.addEventListener("click", (event) => {
       if (clickGuard.shouldIgnoreClick(event)) return;
-      this.setIndex(slide.index);
-      this.exitGrid();
+      this.commitTransition(slide.index, "single");
     });
 
     const host = this.createSlideHost(slide, html, css, "peitho-preview-slide");
@@ -585,20 +637,11 @@ class PreviewShellController implements PreviewShell {
   }
 
   private enterGrid(): void {
-    if (this.mode === "grid") return;
-    this.mode = "grid";
-    this.selectedIndex = this.clampIndex(this.currentIndex);
-    this.applyLayout();
-    this.saveState();
+    this.commitTransition(this.currentIndex, "grid");
   }
 
   private exitGrid(): void {
-    if (this.mode === "single") return;
-    this.mode = "single";
-    this.selectedIndex = this.clampIndex(this.selectedIndex);
-    this.currentIndex = this.selectedIndex;
-    this.applyLayout();
-    this.saveState();
+    this.commitTransition(this.selectedIndex, "single");
   }
 
   private activateSelection(): void {
@@ -606,14 +649,53 @@ class PreviewShellController implements PreviewShell {
   }
 
   private setIndex(index: number): void {
-    const next = this.clampIndex(index);
-    if (next === this.currentIndex && next === this.selectedIndex) return;
-    const previousIndex = this.currentIndex < 0 ? null : this.currentIndex;
-    this.currentIndex = next;
-    this.selectedIndex = next;
-    this.applyLayout();
-    this.dispatchSlideChange(previousIndex);
-    this.saveState();
+    this.commitTransition(index, this.mode);
+  }
+
+  private commitTransition(index: number, mode: PreviewMode): void {
+    index = this.clampIndex(index);
+    if (index === this.currentIndex && index === this.selectedIndex && mode === this.mode) return;
+    const sequence = ++this.transitionSequence;
+    const needsFlush =
+      (mode === "grid" && this.mode === "single") ||
+      (mode === "single" && this.slides[index]?.meta.key !== this.notesTextareaKey);
+    const commit = (): void => {
+      const previousIndex = this.currentIndex < 0 ? null : this.currentIndex;
+      this.currentIndex = index;
+      this.selectedIndex = index;
+      this.mode = mode;
+      this.applyLayout();
+      if (previousIndex !== index) this.dispatchSlideChange(previousIndex);
+      this.saveState();
+    };
+
+    if (!needsFlush || this.notesSettled()) {
+      commit();
+      return;
+    }
+
+    void (async () => {
+      while (true) {
+        const flushed = await this.flushNotes();
+        if (sequence !== this.transitionSequence || !flushed) return;
+        if (this.notesSettled()) {
+          commit();
+          return;
+        }
+      }
+    })();
+  }
+
+  private notesAreDirty(): boolean {
+    return this.isDirty(this.notesTextareaKey, this.notesTextarea.value);
+  }
+
+  private notesSettled(): boolean {
+    return this.flushesInFlight === 0 && !this.notesAreDirty();
+  }
+
+  private isDirty(key: string | null, text: string): boolean {
+    return key !== null && text !== (this.notes.notes[key] ?? "");
   }
 
   private resolveTarget(to: PreviewNavigateTarget): number | null {
@@ -832,16 +914,47 @@ class PreviewShellController implements PreviewShell {
     }
     if (raw == null) return null;
     try {
-      const parsed = JSON.parse(raw) as Partial<PreviewState>;
+      const parsed = JSON.parse(raw) as {
+        mode?: unknown;
+        index?: unknown;
+        draft?: unknown;
+      };
       if (
         (parsed.mode === "single" || parsed.mode === "grid") &&
         typeof parsed.index === "number"
       ) {
-        return { mode: parsed.mode, index: parsed.index };
+        const state: PreviewState = { mode: parsed.mode, index: parsed.index };
+        if (isPreviewDraft(parsed.draft)) state.draft = parsed.draft;
+        return state;
       }
     } catch (_error) {
       return null;
     }
     return null;
+  }
+
+  private restoreDraft(draft: PreviewDraft | undefined): void {
+    if (draft === undefined) return;
+    const key = this.slides[this.currentIndex]?.meta.key;
+    if (draft.key === key) {
+      if (draft.text !== undefined) this.notesTextarea.value = draft.text;
+      const selectionStart = Math.min(draft.selectionStart, this.notesTextarea.value.length);
+      const selectionEnd = Math.min(draft.selectionEnd, this.notesTextarea.value.length);
+      if (draft.focused && this.mode === "single") this.notesTextarea.focus();
+      this.notesTextarea.setSelectionRange(selectionStart, selectionEnd);
+    }
+    this.writeState({ mode: this.mode, index: this.stateIndex() });
+  }
+
+  private stateIndex(): number {
+    return this.clampIndex(this.selectedIndex >= 0 ? this.selectedIndex : this.currentIndex);
+  }
+
+  private writeState(state: PreviewState): void {
+    try {
+      this.storage?.setItem(PREVIEW_STATE_KEY, JSON.stringify(state));
+    } catch (error) {
+      this.log.error(`Failed to save preview state: ${String(error)}`);
+    }
   }
 }

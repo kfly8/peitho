@@ -1209,7 +1209,7 @@ it("serializes_overlapping_flushes", async () => {
   });
 });
 
-it("posts_text_typed_behind_an_in_flight_save_even_after_navigation", async () => {
+it("navigation_waits_for_text_typed_behind_an_in_flight_save", async () => {
   const root = document.createElement("main");
   const bus = new EventTarget();
   const fixture = previewFetchFixture();
@@ -1231,7 +1231,7 @@ it("posts_text_typed_behind_an_in_flight_save_even_after_navigation", async () =
   note.value = "AB";
   note.dispatchEvent(new Event("blur"));
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
-  expect(shell.currentIndex).toBe(1);
+  expect(shell.currentIndex).toBe(0);
 
   fixture.resolveNotesPost(okJson({ saved: true }));
   await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(2));
@@ -1240,7 +1240,628 @@ it("posts_text_typed_behind_an_in_flight_save_even_after_navigation", async () =
     text: "AB"
   });
   fixture.resolveNotesPost(okJson({ saved: true }));
-  await vi.waitFor(() => expect(fixture.notes.notes.intro).toBe("AB"));
+  await vi.waitFor(() => {
+    expect(fixture.notes.notes.intro).toBe("AB");
+    expect(shell.currentIndex).toBe(1);
+  });
+  expect(fixture.notesPosts()).toHaveLength(2);
+});
+
+it("flushes_before_slide_and_grid_index_changes", async () => {
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  const bus = new EventTarget();
+  const fixture = previewFetchFixture();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const panel = root.querySelector<HTMLElement>('[data-peitho-preview="notes"]')!;
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+
+  note.value = "thumbnail edit";
+  note.focus();
+  root.querySelectorAll<HTMLElement>(".peitho-preview-thumb")[1].click();
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  expect(shell.currentIndex).toBe(0);
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(shell.currentIndex).toBe(1));
+
+  note.value = "navigation edit";
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(2));
+  expect(shell.currentIndex).toBe(1);
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(shell.currentIndex).toBe(2));
+
+  note.value = "enter grid edit";
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "enter" } })
+  );
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(3));
+  expect(shell.currentIndex).toBe(2);
+  expect(shell.mode).toBe("single");
+
+  fixture.resolveNotesPost({
+    ok: false,
+    status: 409,
+    text: async () => JSON.stringify({ error: "deck is temporarily invalid" })
+  } as Response);
+  await vi.waitFor(() => expect(status.textContent).toBe("deck is temporarily invalid"));
+  expect(shell.currentIndex).toBe(2);
+  expect(shell.mode).toBe("single");
+  expect(panel.hidden).toBe(false);
+  expect(note.value).toBe("enter grid edit");
+  expect(document.activeElement).toBe(note);
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "enter" } })
+  );
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(4));
+  expect(shell.currentIndex).toBe(2);
+  expect(shell.mode).toBe("single");
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(shell.mode).toBe("grid"));
+
+  // Synthetic: entering grid is gated on a settled note and the hidden textarea cannot be typed into; this only exercises the exit-to-another-slide gate.
+  note.value = "grid edit";
+  bus.dispatchEvent(
+    new CustomEvent("peitho:navigate", { detail: { to: { index: 0 } } })
+  );
+  expect(shell.currentIndex).toBe(0);
+  expect(shell.mode).toBe("grid");
+  expect(fixture.notesPosts()).toHaveLength(4);
+
+  mockSelection(true);
+  root.querySelectorAll<HTMLElement>(".peitho-preview-tile")[0].click();
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(5));
+  expect(JSON.parse(fixture.notesPosts()[4][1].body as string)).toEqual({
+    key: "end",
+    text: "grid edit"
+  });
+  expect(shell.mode).toBe("grid");
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => {
+    expect(shell.currentIndex).toBe(0);
+    expect(shell.mode).toBe("single");
+  });
+});
+
+it("reflushes_text_typed_during_a_transition_save", async () => {
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  const bus = new EventTarget();
+  const fixture = previewFetchFixture();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+
+  note.value = "in flight";
+  note.focus();
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  expect(shell.currentIndex).toBe(0);
+
+  note.value = "typed during save";
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(2));
+  expect(JSON.parse(fixture.notesPosts()[1][1].body as string)).toEqual({
+    key: "intro",
+    text: "typed during save"
+  });
+  expect(shell.currentIndex).toBe(0);
+
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(shell.currentIndex).toBe(1));
+  expect(document.activeElement).toBe(note);
+});
+
+it("transition_waits_for_every_queued_flush", async () => {
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  const fixture = previewFetchFixture();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+
+  note.value = "A";
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  expect(JSON.parse(fixture.notesPosts()[0][1].body as string)).toEqual({
+    key: "intro",
+    text: "A"
+  });
+  expect(shell.currentIndex).toBe(0);
+
+  note.value = "AB";
+  note.dispatchEvent(new Event("blur"));
+  note.value = "A";
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(2));
+  expect(JSON.parse(fixture.notesPosts()[1][1].body as string)).toEqual({
+    key: "intro",
+    text: "AB"
+  });
+  expect(shell.currentIndex).toBe(0);
+
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(3));
+  expect(JSON.parse(fixture.notesPosts()[2][1].body as string)).toEqual({
+    key: "intro",
+    text: "A"
+  });
+  expect(shell.currentIndex).toBe(0);
+
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(shell.currentIndex).toBe(1));
+  bus.dispatchEvent(
+    new CustomEvent("peitho:navigate", { detail: { to: { index: 0 } } })
+  );
+  expect(shell.currentIndex).toBe(0);
+  expect(note.value).toBe("A");
+  expect(fixture.notes.notes.intro).toBe("A");
+});
+
+it("a_no_op_transition_does_not_cancel_a_pending_one", async () => {
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  const fixture = previewFetchFixture();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+
+  note.value = "A";
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  expect(shell.currentIndex).toBe(0);
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "activate" } })
+  );
+  root.querySelectorAll<HTMLElement>(".peitho-preview-thumb")[0].click();
+  fixture.resolveNotesPost(okJson({ saved: true }));
+
+  await vi.waitFor(() => expect(shell.currentIndex).toBe(1));
+  expect(fixture.notesPosts()).toHaveLength(1);
+});
+
+it("reload_state_keeps_text_while_a_save_is_in_flight", async () => {
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  const fixture = previewFetchFixture();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountPreviewShell({
+    root,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+
+  note.value = "A";
+  note.dispatchEvent(new Event("blur"));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  note.value = "";
+  note.focus();
+  shell.saveState();
+
+  expect(JSON.parse(sessionStorage.getItem("peitho:preview-state")!)).toMatchObject({
+    draft: { key: "intro", text: "", focused: true }
+  });
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(fixture.notes.notes.intro).toBe("A"));
+});
+
+it("pagehide_before_load_keeps_the_stored_state", async () => {
+  const storedState = JSON.stringify({
+    mode: "single",
+    index: 1,
+    draft: {
+      key: "middle",
+      text: "kept",
+      selectionStart: 0,
+      selectionEnd: 0,
+      focused: true
+    }
+  });
+  sessionStorage.setItem("peitho:preview-state", storedState);
+  const root = document.createElement("main");
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url === "/sync") return okJson({ seq: 0, message: null, generation: 0 });
+    if (url === "manifest.json") throw new Error("manifest unavailable");
+    return { ok: false, status: 404, text: async () => "not found" } as Response;
+  });
+  const fetcher = fetchMock as unknown as typeof fetch;
+  const shell = await mountPreviewShell({
+    root,
+    fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  window.dispatchEvent(new Event("pagehide"));
+
+  expect(sessionStorage.getItem("peitho:preview-state")).toBe(storedState);
+  expect(fetchMock.mock.calls.filter(([input]) => String(input) === "/notes")).toHaveLength(0);
+});
+
+it("pagehide_saves_a_draft_and_posts_with_keepalive", async () => {
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  const fixture = previewFetchFixture();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 1 }));
+  const shell = await mountPreviewShell({
+    root,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+
+  note.value = "before pagehide";
+  note.dispatchEvent(new Event("blur"));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  expect(fixture.notesPosts()[0][1].keepalive).toBe(false);
+
+  note.value = "reload draft";
+  note.focus();
+  note.setSelectionRange(3, 8);
+  window.dispatchEvent(new Event("pagehide"));
+  expect(fixture.notesPosts()).toHaveLength(2);
+  expect(JSON.parse(sessionStorage.getItem("peitho:preview-state")!)).toMatchObject({
+    draft: {
+      key: "middle",
+      text: "reload draft",
+      selectionStart: 3,
+      selectionEnd: 8,
+      focused: true
+    }
+  });
+  expect(fixture.notesPosts().at(-1)![1].keepalive).toBe(true);
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(fixture.notes.notes.middle).toBe("before pagehide"));
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(fixture.notes.notes.middle).toBe("reload draft"));
+
+  note.value = "あ".repeat(25_000);
+  window.dispatchEvent(new Event("pagehide"));
+  expect(fixture.notesPosts()).toHaveLength(3);
+  expect(fixture.notesPosts().at(-1)![1].keepalive).toBe(false);
+  fixture.resolveNotesPost(okJson({ saved: true }));
+});
+
+it("restores_and_clears_a_focused_draft_with_selection", async () => {
+  const draft = {
+    key: "middle",
+    text: "reload draft",
+    selectionStart: 3,
+    selectionEnd: 8,
+    focused: true
+  };
+  const state = { mode: "single", index: 1, draft };
+
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify(state));
+  const cleanFixture = previewFetchFixture(manifest, cssText, {
+    version: 1,
+    notes: { middle: "reload draft" }
+  });
+  const cleanRoot = document.createElement("main");
+  document.body.appendChild(cleanRoot);
+  cleanups.push(() => cleanRoot.remove());
+  const cleanShell = await mountPreviewShell({
+    root: cleanRoot,
+    fetcher: cleanFixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(cleanShell);
+  const cleanNote = cleanRoot.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="note"]'
+  )!;
+  expect(cleanNote.value).toBe("reload draft");
+  expect(cleanNote.selectionStart).toBe(3);
+  expect(cleanNote.selectionEnd).toBe(8);
+  expect(document.activeElement).toBe(cleanNote);
+  expect(JSON.parse(sessionStorage.getItem("peitho:preview-state")!)).toEqual({
+    mode: "single",
+    index: 1
+  });
+  cleanNote.blur();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(cleanFixture.notesPosts()).toHaveLength(0);
+  cleanShell.destroy();
+  shells.pop();
+  cleanRoot.remove();
+
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify(state));
+  const dirtyFixture = previewFetchFixture();
+  const dirtyRoot = document.createElement("main");
+  document.body.appendChild(dirtyRoot);
+  cleanups.push(() => dirtyRoot.remove());
+  const dirtyShell = await mountPreviewShell({
+    root: dirtyRoot,
+    fetcher: dirtyFixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(dirtyShell);
+  const dirtyNote = dirtyRoot.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="note"]'
+  )!;
+  expect(dirtyNote.value).toBe("reload draft");
+  expect(dirtyNote.selectionStart).toBe(3);
+  expect(dirtyNote.selectionEnd).toBe(8);
+  expect(document.activeElement).toBe(dirtyNote);
+  expect(JSON.parse(sessionStorage.getItem("peitho:preview-state")!)).toEqual({
+    mode: "single",
+    index: 1
+  });
+
+  dirtyNote.blur();
+  await vi.waitFor(() => expect(dirtyFixture.notesPosts()).toHaveLength(1));
+  expect(JSON.parse(dirtyFixture.notesPosts()[0][1].body as string)).toEqual({
+    key: "middle",
+    text: "reload draft"
+  });
+  dirtyFixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(dirtyFixture.notes.notes.middle).toBe("reload draft"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  dirtyNote.focus();
+  dirtyShell.saveState();
+  const settledDraft = JSON.parse(sessionStorage.getItem("peitho:preview-state")!).draft;
+  expect(settledDraft).toMatchObject({ key: "middle", focused: true });
+  expect(settledDraft).not.toHaveProperty("text");
+});
+
+it("clean_draft_does_not_overwrite_freshly_loaded_notes", async () => {
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({
+      mode: "single",
+      index: 1,
+      draft: {
+        key: "middle",
+        selectionStart: 1,
+        selectionEnd: 3,
+        focused: true
+      }
+    })
+  );
+  const fixture = previewFetchFixture(manifest, cssText, {
+    version: 1,
+    notes: { middle: "new" }
+  });
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  const shell = await mountPreviewShell({
+    root,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+
+  expect(note.value).toBe("new");
+  expect(note.selectionStart).toBe(1);
+  expect(note.selectionEnd).toBe(3);
+  expect(document.activeElement).toBe(note);
+  expect(JSON.parse(sessionStorage.getItem("peitho:preview-state")!)).toEqual({
+    mode: "single",
+    index: 1
+  });
+
+  note.blur();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(fixture.notesPosts()).toHaveLength(0);
+});
+
+it("restores_an_unfocused_draft_without_focusing", async () => {
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({
+      mode: "single",
+      index: 1,
+      draft: {
+        key: "middle",
+        text: "draft",
+        selectionStart: 1,
+        selectionEnd: 4,
+        focused: false
+      }
+    })
+  );
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  const shell = await mountForTest(root, new EventTarget());
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+
+  expect(note.value).toBe("draft");
+  expect(note.selectionStart).toBe(1);
+  expect(note.selectionEnd).toBe(4);
+  expect(document.activeElement).not.toBe(note);
+});
+
+it("drops_a_draft_whose_key_is_gone", async () => {
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({
+      mode: "single",
+      index: 1,
+      draft: {
+        key: "gone",
+        text: "x",
+        selectionStart: 0,
+        selectionEnd: 0,
+        focused: true
+      }
+    })
+  );
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  const shell = await mountForTest(root, new EventTarget());
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+  const restoredState = JSON.parse(sessionStorage.getItem("peitho:preview-state")!);
+
+  expect(note.value).toBe("Pause here.\nThen ask.");
+  expect(document.activeElement).not.toBe(note);
+  expect(restoredState).toEqual({ mode: "single", index: 1 });
+  expect(restoredState).not.toHaveProperty("draft");
+});
+
+it("ignores_a_malformed_draft_without_discarding_valid_preview_state", async () => {
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({
+      mode: "single",
+      index: 2,
+      draft: {
+        key: "end",
+        text: "malformed",
+        selectionStart: -1,
+        selectionEnd: 4,
+        focused: true
+      }
+    })
+  );
+  const root = document.createElement("main");
+  const shell = await mountForTest(root, new EventTarget());
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+
+  expect(shell.mode).toBe("single");
+  expect(shell.currentIndex).toBe(2);
+  expect(note.value).toBe("");
+});
+
+it("navigating_away_and_back_during_an_in_flight_save_does_not_revert_it", async () => {
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  const fixture = previewFetchFixture();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+
+  note.value = "A";
+  bus.dispatchEvent(
+    new CustomEvent("peitho:navigate", { detail: { to: { index: 1 } } })
+  );
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  expect(shell.currentIndex).toBe(0);
+
+  note.value = "";
+  bus.dispatchEvent(
+    new CustomEvent("peitho:navigate", { detail: { to: { index: 1 } } })
+  );
+  expect(shell.currentIndex).toBe(0);
+  expect(fixture.notesPosts()).toHaveLength(1);
+
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(2));
+  expect(JSON.parse(fixture.notesPosts()[1][1].body as string)).toEqual({
+    key: "intro",
+    text: ""
+  });
+  expect(shell.currentIndex).toBe(0);
+
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(shell.currentIndex).toBe(1));
+  bus.dispatchEvent(
+    new CustomEvent("peitho:navigate", { detail: { to: { index: 0 } } })
+  );
+
+  expect(shell.currentIndex).toBe(0);
+  expect(note.value).toBe("");
+  note.dispatchEvent(new Event("blur"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(fixture.notesPosts()).toHaveLength(2);
+});
+
+it("destroy_cancels_a_pending_transition_commit", async () => {
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  const fixture = previewFetchFixture();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+
+  note.value = "A";
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  expect(shell.currentIndex).toBe(0);
+  sessionStorage.removeItem("peitho:preview-state");
+
+  shell.destroy();
+  shells.pop();
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(fixture.notes.notes.intro).toBe("A"));
+
+  expect(shell.currentIndex).toBe(0);
+  expect(sessionStorage.getItem("peitho:preview-state")).toBeNull();
 });
 
 it("resize_does_not_overwrite_a_dirty_note", async () => {

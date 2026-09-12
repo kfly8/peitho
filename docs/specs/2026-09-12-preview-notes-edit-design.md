@@ -273,7 +273,8 @@ so the shell can show them verbatim. The server never runs a rebuild itself.
   (`data-peitho-preview="status"`) that shows the last save error (red) and
   is empty otherwise. No spinner.
 - Dirty is derived, not stored: `textarea.value !== (notes[key] ?? "")`.
-- `flushNotes(keepalive = false)`: if the current slide's textarea is dirty,
+- `flushNotes()` (the chained path; `pagehide` calls the underlying `doFlush`
+  directly with `keepalive`): if the current slide's textarea is dirty,
   `POST /notes` with `{key, text}`. On 200 the in-memory `notes` map is updated
   (entry removed when text is empty) and the status is cleared; a clean flush
   also clears a stale status. On any error the status shows the message and the
@@ -284,21 +285,45 @@ so the shell can show them verbatim. The server never runs a rebuild itself.
   overlapping blurs never send the same text twice, and same-key saves reach the
   server in order (the server handles each request on its own thread, so client
   ordering is the only ordering).
-- Flush points: textarea `blur`, the start of `setIndex` (before
-  `currentIndex` moves), `exitGrid`/`enterGrid` when the index changes,
-  and `pagehide` with `keepalive: true`. `saveState` (called by
+- Flush points: textarea `blur`, every transition that would change the
+  textarea's key or hide the panel by entering grid mode, and `pagehide` with
+  `keepalive: true`. All transitions go through one `commitTransition(index,
+  mode)` seam (revised 2026-09-13 in Task 8 review); grid selection moves keep
+  the textarea's key and are not gated, and `exitGrid` to another slide is.
+  The gate treats the note as clean only when no flush is in flight *and* the
+  value equals the map: while a save is in flight the map is stale, so a value
+  that merely equals it is not proof of cleanliness and the transition waits
+  for the queued flush's own turn-time check. `pagehide` posts the current
+  snapshot directly with `keepalive` instead of queuing behind the chain,
+  because an unloading document aborts an in-flight non-keepalive fetch and
+  the continuation never runs. Accepted residual: that direct request can
+  overtake a chained save for the same key that is already on the wire, and
+  the server serializes writes but not arrival, so the older text can win on
+  disk. A reload self-heals (the draft carries the newer text and is retried);
+  a tab closed inside that window loses only the text typed since the last
+  blur. The keepalive fallback measures the encoded body in bytes
+  (`TextEncoder`), not UTF-16 code units. `saveState` (called by
   `installPreviewReload` before `location.reload()`) also stores the draft.
 - A slide change with a dirty note waits for the flush and is committed only
   on success. A failed save (409 while the deck is broken, 422 for
   unrepresentable text) shows its message in the status line and leaves the
   index, text, and focus where they were, so unsaved text is never lost and
   the next flush retries. Approved by the author 2026-09-12.
-- Preview state gains `draft?: { key, text, selectionStart, selectionEnd,
-  focused }`. After a reload, if `draft.key` is the current slide's key the
-  textarea is filled from the draft and, when `focused`, refocused with the
-  selection restored. Dirty then follows the same derived rule, so a draft
-  whose rebuild already landed is clean and one still in flight is retried
-  on the next flush. The draft is cleared from storage once applied.
+- Preview state gains `draft?: { key, text?, selectionStart, selectionEnd,
+  focused }`. `text` is present only when the note is dirty at save time
+  (revised 2026-09-13 in Task 8 review): a clean note's text lives in
+  `notes.json`, and persisting it would resurrect stale text over a note the
+  author just edited in the editor when the rebuild reloads the page. The
+  draft itself is stored only when the note is dirty or the textarea is
+  focused, so selection and focus survive a reload of a clean note. After a
+  reload, if `draft.key` is the current slide's key the textarea takes the
+  draft text when present, the selection is restored, and when `focused` is
+  true it is refocused (single mode only). Dirty then follows the same derived
+  rule, so a draft whose rebuild already landed is clean and one still in
+  flight is retried on the next flush. The draft is cleared from storage once
+  applied, and also when its key no longer exists in the rebuilt deck.
+  `saveState` is a no-op until `load` has finished, so a reload or tab close
+  during the load window cannot overwrite the stored state with defaults.
 - Escape inside the textarea blurs it (handled on the textarea's own
   `keydown` in the shell; the blur flushes). Focus survives PageUp/PageDown
   because the textarea element is reused across slides.
@@ -335,7 +360,11 @@ flush, and the state transitions live in the preview shell.
   next successful build's reload (the draft survives in preview state).
 - **Key vanished between build and save** (the author retitled the slide
   in the editor and the derived key changed): 409 with the key in the
-  message; the draft stays in the textarea.
+  message; the draft stays in the textarea. If the retitle lands as a
+  rebuild while the note is dirty, the reload finds no slide with the draft's
+  key and drops the draft silently; the server would have answered 409 for
+  that key anyway, so this is an accepted loss scoped to editing the same
+  slide's heading and note at once.
 - **Included slides:** written to the include file. Synthetic-origin spans
   are refused with a message naming the file to edit.
 - **Skipped slides:** editable like any other.
