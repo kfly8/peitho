@@ -6,7 +6,7 @@ use std::{
 use crate::{
     domain::{
         AspectRatio, CodeImagesConfig, RawImagePath, RenderedSlide, Resolution, ResolvedImageAsset,
-        ResolvedImagePath, SlideKey, SlotContract, SlotName, SourceFragment,
+        ResolvedImagePath, SlideKey, SlotContract, SlotName, SourceFragment, SourceSpan,
     },
     error::{BuildError, Result},
     layout::Layout,
@@ -477,6 +477,7 @@ pub struct LayoutRequest {
 pub struct ParsedSlide {
     pub index: usize,
     pub source_index: usize,
+    pub source_span: SourceSpan,
     pub key: SlideKey,
     pub key_source: KeySource,
     pub layout_request: Option<LayoutRequest>,
@@ -485,6 +486,7 @@ pub struct ParsedSlide {
     pub step_count: usize,
     pub page_number_hidden: bool,
     pub notes: Option<String>,
+    pub note_spans: Vec<SourceSpan>,
 }
 
 #[derive(Debug, Clone)]
@@ -1159,6 +1161,7 @@ mod tests {
                 key: SlideKey::new("arch-1").unwrap(),
                 index: 0,
                 source_index: 0,
+                source_span: crate::domain::SourceSpan { start: 0, end: 0 },
                 key_source: KeySource::Explicit { line: 1 },
                 layout_request: None,
                 fragments: vec![SourceFragment::paragraph(3, "body")],
@@ -1166,6 +1169,7 @@ mod tests {
                 step_count: 0,
                 page_number_hidden: false,
                 notes: None,
+                note_spans: Vec::new(),
             }],
         );
 

@@ -533,6 +533,7 @@ mod tests {
             vec![ParsedSlide {
                 index: 0,
                 source_index: 0,
+                source_span: crate::domain::SourceSpan { start: 0, end: 0 },
                 key: crate::domain::SlideKey::new("cards").unwrap(),
                 key_source: KeySource::Explicit { line: 1 },
                 layout_request: None,
@@ -554,6 +555,7 @@ mod tests {
                 step_count: 0,
                 page_number_hidden: false,
                 notes: None,
+                note_spans: Vec::new(),
             }],
         );
 
@@ -955,6 +957,7 @@ mod tests {
             vec![ParsedSlide {
                 index: 0,
                 source_index: 0,
+                source_span: crate::domain::SourceSpan { start: 0, end: 0 },
                 key: SlideKey::new("intro").unwrap(),
                 key_source: KeySource::Derived { line: Some(1) },
                 layout_request: None,
@@ -970,6 +973,7 @@ mod tests {
                 step_count: 0,
                 page_number_hidden: false,
                 notes: None,
+                note_spans: Vec::new(),
             }],
         );
 
@@ -1002,6 +1006,7 @@ mod tests {
             vec![ParsedSlide {
                 index: 0,
                 source_index: 0,
+                source_span: crate::domain::SourceSpan { start: 0, end: 0 },
                 key: SlideKey::new("intro").unwrap(),
                 key_source: KeySource::Derived { line: Some(1) },
                 layout_request: None,
@@ -1013,6 +1018,7 @@ mod tests {
                 step_count: 0,
                 page_number_hidden: false,
                 notes: None,
+                note_spans: Vec::new(),
             }],
         );
 
@@ -1043,6 +1049,7 @@ mod tests {
             vec![ParsedSlide {
                 index: 0,
                 source_index: 0,
+                source_span: crate::domain::SourceSpan { start: 0, end: 0 },
                 key: SlideKey::new("intro").unwrap(),
                 key_source: KeySource::Derived { line: Some(1) },
                 layout_request: None,
@@ -1058,6 +1065,7 @@ mod tests {
                 step_count: 0,
                 page_number_hidden: false,
                 notes: None,
+                note_spans: Vec::new(),
             }],
         );
 
@@ -1097,6 +1105,7 @@ mod tests {
             vec![ParsedSlide {
                 index: 0,
                 source_index: 0,
+                source_span: crate::domain::SourceSpan { start: 0, end: 0 },
                 key: SlideKey::new("intro").unwrap(),
                 key_source: KeySource::Derived { line: Some(1) },
                 layout_request: None,
@@ -1112,6 +1121,7 @@ mod tests {
                 step_count: 0,
                 page_number_hidden: false,
                 notes: None,
+                note_spans: Vec::new(),
             }],
         );
 
