@@ -1,5 +1,6 @@
 use std::{
     fs,
+    ops::Range,
     path::{Component, Path, PathBuf},
 };
 
@@ -7,6 +8,7 @@ use pulldown_cmark::{Event, Parser, Tag};
 use serde_json::Value;
 
 use crate::{
+    domain::SourceSpan,
     error::{BuildError, ErrorKind},
     Result,
 };
@@ -18,6 +20,27 @@ pub struct ExpandedSource {
     pub source: String,
     pub body_start: usize,
     pub line_map: LineMap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineCol {
+    /// The 1-based line number.
+    pub line: usize,
+    /// The 0-based byte offset from the start of the line.
+    pub byte_col: usize,
+}
+
+/// A half-open span whose bytes come from one origin file.
+///
+/// `combined` is the clipped span in the include-expanded source containing those same bytes.
+/// `end` is exclusive and is expressed on the line of the last byte covered. If the span ends with
+/// a line terminator, its `byte_col` equals that line's byte length including the terminator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginSpan {
+    pub file: PathBuf,
+    pub combined: SourceSpan,
+    pub start: LineCol,
+    pub end: LineCol,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +84,131 @@ impl LineMap {
         (PathBuf::new(), line)
     }
 
+    /// Translates a half-open combined-source byte span into one origin file.
+    ///
+    /// Synthetic units at either edge are clipped. Every remaining byte must map to `Source`
+    /// entries of one file with consecutive line numbers. A span containing only synthetic bytes,
+    /// an internal synthetic byte, mixed files, invalid bounds, or a map that does not match the
+    /// source yields `None`.
+    pub fn translate_span(&self, combined_source: &str, span: SourceSpan) -> Option<OriginSpan> {
+        if span.start >= span.end
+            || span.end > combined_source.len()
+            || !combined_source.is_char_boundary(span.start)
+            || !combined_source.is_char_boundary(span.end)
+        {
+            return None;
+        }
+
+        struct IntersectingUnit<'a> {
+            origin: &'a LineOrigin,
+            start: usize,
+            end: usize,
+        }
+
+        let bytes = combined_source.as_bytes();
+        let mut combined_offset = 0usize;
+        let mut intersecting = Vec::new();
+
+        for (index, origin) in self.origins.iter().enumerate() {
+            if combined_offset >= bytes.len() {
+                return None;
+            }
+
+            let unit_start = combined_offset;
+            let unit_end = match origin.kind {
+                LineOriginKind::Source { .. } => {
+                    let newline = bytes[unit_start..].iter().position(|byte| *byte == b'\n');
+                    // The newline after an unterminated source line belongs to the following
+                    // SyntheticTerminator entry, rather than to this Source entry.
+                    let has_synthetic_terminator = self
+                        .origins
+                        .get(index + 1)
+                        .is_some_and(|next| next.kind == LineOriginKind::SyntheticTerminator);
+                    match (newline, has_synthetic_terminator) {
+                        (Some(newline), true) => unit_start + newline,
+                        (Some(newline), false) => unit_start + newline + 1,
+                        (None, true) => return None,
+                        (None, false) => bytes.len(),
+                    }
+                }
+                LineOriginKind::SyntheticTerminator => {
+                    if bytes[unit_start] != b'\n' {
+                        return None;
+                    }
+                    unit_start + 1
+                }
+                LineOriginKind::SyntheticLine => {
+                    if bytes[unit_start] != b'\n' {
+                        return None;
+                    }
+                    unit_start + 1
+                }
+            };
+            combined_offset = unit_end;
+
+            if span.start < unit_end && span.end > unit_start {
+                intersecting.push(IntersectingUnit {
+                    origin,
+                    start: unit_start,
+                    end: unit_end,
+                });
+            }
+        }
+
+        if combined_offset != bytes.len() {
+            return None;
+        }
+
+        let first_source = intersecting
+            .iter()
+            .position(|unit| matches!(unit.origin.kind, LineOriginKind::Source { .. }))?;
+        let last_source = intersecting
+            .iter()
+            .rposition(|unit| matches!(unit.origin.kind, LineOriginKind::Source { .. }))?;
+        let mapped = &intersecting[first_source..=last_source];
+        let first = mapped.first()?;
+        let last = mapped.last()?;
+        let LineOriginKind::Source { line: start_line } = first.origin.kind else {
+            return None;
+        };
+        let LineOriginKind::Source { line: end_line } = last.origin.kind else {
+            return None;
+        };
+        let file = first.origin.file.as_path();
+        let mut previous_line: Option<usize> = None;
+
+        for unit in mapped {
+            let LineOriginKind::Source { line } = unit.origin.kind else {
+                return None;
+            };
+            if unit.origin.file.as_path() != file {
+                return None;
+            }
+            if previous_line.is_some_and(|previous_line| previous_line.checked_add(1) != Some(line))
+            {
+                return None;
+            }
+            previous_line = Some(line);
+        }
+
+        let combined = SourceSpan {
+            start: span.start.max(first.start),
+            end: span.end.min(last.end),
+        };
+        Some(OriginSpan {
+            file: file.to_path_buf(),
+            combined,
+            start: LineCol {
+                line: start_line,
+                byte_col: combined.start - first.start,
+            },
+            end: LineCol {
+                line: end_line,
+                byte_col: combined.end - last.start,
+            },
+        })
+    }
+
     pub fn origins(&self) -> &[LineOrigin] {
         &self.origins
     }
@@ -91,6 +239,34 @@ impl LineMap {
     }
 }
 
+/// Indexes text as read from disk by 1-based line and 0-based byte column.
+///
+/// A leading BOM is skipped and the returned range is offset past it. Returns `None` for a
+/// missing line or byte column, or for an empty or reversed range.
+pub fn origin_span_to_range(origin_source: &str, span: &OriginSpan) -> Option<Range<usize>> {
+    let source = strip_bom(origin_source);
+    let bom_len = origin_source.len() - source.len();
+    let start = bom_len + line_col_to_offset(source, span.start)?;
+    let end = bom_len + line_col_to_offset(source, span.end)?;
+    (start < end).then_some(start..end)
+}
+
+fn strip_bom(source: &str) -> &str {
+    source.strip_prefix('\u{feff}').unwrap_or(source)
+}
+
+fn line_col_to_offset(source: &str, line_col: LineCol) -> Option<usize> {
+    let source_line = source_lines_from(source, 0)
+        .into_iter()
+        .find(|source_line| source_line.line_no == line_col.line)?;
+    if line_col.byte_col > source_line.end - source_line.start {
+        return None;
+    }
+
+    let offset = source_line.start + line_col.byte_col;
+    source.is_char_boundary(offset).then_some(offset)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineOrigin {
     pub file: PathBuf,
@@ -104,11 +280,15 @@ pub enum LineOriginKind {
     SyntheticLine,
 }
 
+/// Expands include directives, stripping one leading BOM from every source it reads.
+///
+/// `top_body_start` is interpreted against the BOM-stripped text, matching the parser.
 pub fn expand_includes(
     top_source: &str,
     top_body_start: usize,
     top_path: &Path,
 ) -> Result<ExpandedSource> {
+    let top_source = strip_bom(top_source);
     let mut stack = vec![path_key(top_path)];
     let deck_root = include_deck_root(top_path);
     expand_includes_for_source(top_source, top_body_start, top_path, &deck_root, &mut stack)
@@ -162,20 +342,21 @@ fn expand_includes_for_source(
             include_read_error(&include.target, &include_path, include.line, err)
                 .with_origin_file(current_path)
         })?;
-        if source_has_no_content(&included_source) {
+        let included_source = strip_bom(&included_source);
+        if source_has_no_content(included_source) {
             return Err(
                 included_file_has_no_slides_error(&include.target, include.line)
                     .with_origin_file(current_path),
             );
         }
-        if let Some(line) = crate::parser::detect_frontmatter_present(&included_source) {
+        if let Some(line) = crate::parser::detect_frontmatter_present(included_source) {
             return Err(included_frontmatter_error(line).with_origin_file(&include_path));
         }
-        validate_included_source_boundary(&included_source)
+        validate_included_source_boundary(included_source)
             .map_err(|err| err.with_origin_file(&include_path))?;
         stack.push(include_key);
         let expanded =
-            expand_includes_for_source(&included_source, 0, &include_path, deck_root, stack)?;
+            expand_includes_for_source(included_source, 0, &include_path, deck_root, stack)?;
         stack.pop();
         append_region_leading_newline_if_needed(
             &mut source,
@@ -282,7 +463,7 @@ fn append_region_leading_newline_if_needed(
     if replacement.source.is_empty() || output.is_empty() || output.ends_with('\n') {
         return;
     }
-    if source[region_start..].starts_with('\n') {
+    if source[region_start..].starts_with('\n') || source[region_start..].starts_with("\r\n") {
         append_synthetic_boundary_newline(output, origins, current_path);
     }
 }
@@ -739,21 +920,85 @@ fn is_slide_separator(line: &str) -> bool {
 }
 
 fn source_has_no_content(source: &str) -> bool {
-    source
-        .strip_prefix('\u{feff}')
-        .unwrap_or(source)
-        .trim()
-        .is_empty()
+    source.trim().is_empty()
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use crate::domain::{FragmentKind, SlotName};
 
     use super::*;
+
+    fn origin_span(
+        file: &Path,
+        combined: (usize, usize),
+        start: (usize, usize),
+        end: (usize, usize),
+    ) -> OriginSpan {
+        OriginSpan {
+            file: file.to_path_buf(),
+            combined: SourceSpan {
+                start: combined.0,
+                end: combined.1,
+            },
+            start: LineCol {
+                line: start.0,
+                byte_col: start.1,
+            },
+            end: LineCol {
+                line: end.0,
+                byte_col: end.1,
+            },
+        }
+    }
+
+    fn expand_fixture(
+        dir: &Path,
+        deck: &str,
+        include_name: &str,
+        include: &str,
+    ) -> (PathBuf, PathBuf, ExpandedSource) {
+        let deck_path = dir.join("deck.md");
+        let include_path = dir.join(include_name);
+        fs::write(&include_path, include).unwrap();
+        let expanded = expand_includes(deck, 0, &deck_path).unwrap();
+        (deck_path, include_path, expanded)
+    }
+
+    fn assert_parsed_slide_spans_translate(
+        expanded: &ExpandedSource,
+        expected_origins: &[(&Path, &str)],
+    ) {
+        let frontmatter = crate::parser::parse_frontmatter(&expanded.source).unwrap();
+        let parsed = crate::parser::parse_markdown(
+            &expanded.source,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(parsed.parsed_slides().len(), expected_origins.len());
+        for (slide, (expected_file, origin_source)) in
+            parsed.parsed_slides().iter().zip(expected_origins)
+        {
+            let translated = expanded
+                .line_map
+                .translate_span(&expanded.source, slide.source_span)
+                .expect("every parsed slide span should translate");
+            assert_eq!(translated.file.as_path(), *expected_file);
+            assert!(translated.combined.start >= slide.source_span.start);
+            assert!(translated.combined.end <= slide.source_span.end);
+            let origin_range = origin_span_to_range(origin_source, &translated)
+                .expect("translated coordinates should index the origin");
+            assert_eq!(
+                &origin_source[origin_range],
+                &expanded.source[translated.combined.start..translated.combined.end],
+            );
+        }
+    }
 
     #[test]
     fn expand_includes_returns_source_unchanged_when_no_include_comment_is_present() {
@@ -766,6 +1011,533 @@ mod tests {
         assert_eq!(
             expanded.line_map.translate(4),
             (Path::new("deck.md").to_path_buf(), 4)
+        );
+    }
+
+    #[test]
+    fn expand_includes_strips_top_deck_bom_before_using_body_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let included = dir.path().join("inc.md");
+        let included_source = "# Inc\n";
+        fs::write(&included, included_source).unwrap();
+        let source = "\u{feff}---\ntime: 1m\n---\n<!-- {\"include\":\"inc.md\"} -->\n---\n# Top\n";
+        let frontmatter = crate::parser::parse_frontmatter(source).unwrap();
+
+        let expanded = expand_includes(source, frontmatter.body_start(), &deck).unwrap();
+
+        assert!(expanded.source.starts_with("---\ntime: 1m\n---\n# Inc\n"));
+        assert!(expanded.line_map.origins().iter().any(|origin| {
+            origin.file == deck && origin.kind == LineOriginKind::SyntheticTerminator
+        }));
+        assert_parsed_slide_spans_translate(
+            &expanded,
+            &[
+                (included.as_path(), included_source),
+                (deck.as_path(), source),
+            ],
+        );
+    }
+
+    #[test]
+    fn included_file_bom_is_stripped_before_splicing() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let included = dir.path().join("inc.md");
+        let included_source = "\u{feff}# Included\n\nbody\n";
+        fs::write(&included, included_source).unwrap();
+        let source = "# Top\n\n---\n<!-- {\"include\":\"inc.md\"} -->\n";
+
+        let expanded = expand_includes(source, 0, &deck).unwrap();
+
+        assert!(expanded.source.contains("---\n# Included\n\nbody\n"));
+        assert!(!expanded.source.contains('\u{feff}'));
+        assert_parsed_slide_spans_translate(
+            &expanded,
+            &[
+                (deck.as_path(), source),
+                (included.as_path(), included_source),
+            ],
+        );
+    }
+
+    #[test]
+    fn translate_span_maps_plain_and_included_coordinates() {
+        let dir = tempfile::tempdir().unwrap();
+        let included_source = "# Included\n\n<!-- shared note -->\n";
+        let source = "# Before\n\n---\n<!-- {\"include\":\"shared.md\"} -->\n\n---\n# After\n";
+        let (_, included, expanded) =
+            expand_fixture(dir.path(), source, "shared.md", included_source);
+
+        let combined_start = expanded.source.find("<!-- shared note -->").unwrap();
+        let origin_start = included_source.find("<!-- shared note -->").unwrap();
+        let translated = expanded
+            .line_map
+            .translate_span(
+                &expanded.source,
+                SourceSpan {
+                    start: combined_start,
+                    end: combined_start + "<!-- shared note -->".len(),
+                },
+            )
+            .unwrap();
+        assert_eq!(translated.file, included);
+        assert_eq!(
+            translated.combined,
+            SourceSpan {
+                start: combined_start,
+                end: combined_start + "<!-- shared note -->".len(),
+            }
+        );
+        assert_eq!(
+            translated.start,
+            LineCol {
+                line: 3,
+                byte_col: 0
+            }
+        );
+        assert_eq!(
+            translated.end,
+            LineCol {
+                line: 3,
+                byte_col: 20
+            }
+        );
+        assert_eq!(
+            origin_span_to_range(included_source, &translated),
+            Some(origin_start..origin_start + "<!-- shared note -->".len()),
+        );
+
+        let plain_path = dir.path().join("plain.md");
+        let plain_source = "# Plain\nsecond line\nlast";
+        let plain = expand_includes(plain_source, 0, &plain_path).unwrap();
+        let second_line_start = plain_source.find("second").unwrap();
+
+        let multi_line = plain
+            .line_map
+            .translate_span(
+                &plain.source,
+                SourceSpan {
+                    start: "# ".len(),
+                    end: second_line_start + "second".len(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            multi_line,
+            origin_span(
+                &plain_path,
+                ("# ".len(), second_line_start + "second".len()),
+                (1, 2),
+                (2, 6),
+            )
+        );
+
+        let through_terminator = plain
+            .line_map
+            .translate_span(
+                &plain.source,
+                SourceSpan {
+                    start: second_line_start,
+                    end: second_line_start + "second line\n".len(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            through_terminator,
+            origin_span(
+                &plain_path,
+                (second_line_start, second_line_start + "second line\n".len(),),
+                (2, 0),
+                (2, "second line\n".len()),
+            )
+        );
+
+        let eof_start = plain_source.find("last").unwrap();
+        let through_eof = plain
+            .line_map
+            .translate_span(
+                &plain.source,
+                SourceSpan {
+                    start: eof_start,
+                    end: plain.source.len(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            through_eof,
+            origin_span(
+                &plain_path,
+                (eof_start, plain.source.len()),
+                (3, 0),
+                (3, "last".len()),
+            )
+        );
+
+        let utf8_path = dir.path().join("utf8.md");
+        let utf8_source = "# こんにちは\n";
+        let utf8 = expand_includes(utf8_source, 0, &utf8_path).unwrap();
+        let utf8_start = utf8_source.find('ん').unwrap();
+        let utf8_end = utf8_start + "んに".len();
+        let utf8_span = utf8
+            .line_map
+            .translate_span(
+                &utf8.source,
+                SourceSpan {
+                    start: utf8_start,
+                    end: utf8_end,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            utf8_span,
+            origin_span(&utf8_path, (utf8_start, utf8_end), (1, 5), (1, 11))
+        );
+        assert_eq!(
+            origin_span_to_range(utf8_source, &utf8_span),
+            Some(utf8_start..utf8_end)
+        );
+    }
+
+    #[test]
+    fn translate_span_maps_every_parsed_slide_span_of_include_decks() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let trailing_included_source = "# Included\n\n<!-- note -->\n";
+        let trailing_deck_source =
+            "# Before\n\n---\n<!-- {\"include\":\"trailing-shared.md\"} -->\n\n---\n# After\n";
+        let (trailing_deck, trailing_included, trailing_expanded) = expand_fixture(
+            dir.path(),
+            trailing_deck_source,
+            "trailing-shared.md",
+            trailing_included_source,
+        );
+        assert_parsed_slide_spans_translate(
+            &trailing_expanded,
+            &[
+                (trailing_deck.as_path(), trailing_deck_source),
+                (trailing_included.as_path(), trailing_included_source),
+                (trailing_deck.as_path(), trailing_deck_source),
+            ],
+        );
+
+        let leading_deck = dir.path().join("leading-deck.md");
+        let leading_included = dir.path().join("leading-shared.md");
+        let leading_included_source = "# Included\n";
+        fs::write(&leading_included, leading_included_source).unwrap();
+        let leading_deck_source =
+            "---\ntime: 1m\n---\n<!-- {\"include\":\"leading-shared.md\"} -->\n---\n# Plain\n";
+        let frontmatter = crate::parser::parse_frontmatter(leading_deck_source).unwrap();
+        let leading_expanded =
+            expand_includes(leading_deck_source, frontmatter.body_start(), &leading_deck).unwrap();
+        assert_parsed_slide_spans_translate(
+            &leading_expanded,
+            &[
+                (leading_included.as_path(), leading_included_source),
+                (leading_deck.as_path(), leading_deck_source),
+            ],
+        );
+
+        let plain_deck = dir.path().join("plain-deck.md");
+        let plain_source = "# Plain\n\n<!-- note -->\n";
+        let plain_expanded = expand_includes(plain_source, 0, &plain_deck).unwrap();
+        assert_parsed_slide_spans_translate(
+            &plain_expanded,
+            &[(plain_deck.as_path(), plain_source)],
+        );
+    }
+
+    #[test]
+    fn origin_span_to_range_maps_utf8_and_crlf() {
+        let crlf_source = "# T\r\n\r\n<!-- n -->\r\n";
+        let crlf_start = crlf_source.find("<!-- n -->").unwrap();
+        let crlf_span = origin_span(Path::new("crlf.md"), (0, 1), (3, 0), (3, 12));
+        assert_eq!(
+            origin_span_to_range(crlf_source, &crlf_span),
+            Some(crlf_start..crlf_start + "<!-- n -->\r\n".len())
+        );
+
+        let bom_source = "\u{feff}# T\n\n<!-- n -->\n";
+        let bom_first_line_span = OriginSpan {
+            file: Path::new("bom.md").to_path_buf(),
+            combined: SourceSpan {
+                start: 0,
+                end: "# T\n".len(),
+            },
+            start: LineCol {
+                line: 1,
+                byte_col: 0,
+            },
+            end: LineCol {
+                line: 1,
+                byte_col: "# T\n".len(),
+            },
+        };
+        assert_eq!(
+            origin_span_to_range(bom_source, &bom_first_line_span),
+            Some('\u{feff}'.len_utf8()..'\u{feff}'.len_utf8() + "# T\n".len())
+        );
+
+        let bom_note_start = bom_source.find("<!-- n -->").unwrap();
+        let bom_note_span = OriginSpan {
+            file: Path::new("bom.md").to_path_buf(),
+            combined: SourceSpan {
+                start: bom_note_start - '\u{feff}'.len_utf8(),
+                end: bom_note_start - '\u{feff}'.len_utf8() + "<!-- n -->\n".len(),
+            },
+            start: LineCol {
+                line: 3,
+                byte_col: 0,
+            },
+            end: LineCol {
+                line: 3,
+                byte_col: "<!-- n -->\n".len(),
+            },
+        };
+        let bom_note_range = origin_span_to_range(bom_source, &bom_note_span).unwrap();
+        assert_eq!(
+            bom_note_range,
+            bom_note_start..bom_note_start + "<!-- n -->\n".len()
+        );
+        assert_eq!(&bom_source[bom_note_range], "<!-- n -->\n");
+
+        let utf8_source = "# こんにちは\n";
+        let utf8_start = utf8_source.find('ん').unwrap();
+        let utf8_span = origin_span(Path::new("utf8.md"), (0, 1), (1, 5), (1, 11));
+        assert_eq!(
+            origin_span_to_range(utf8_source, &utf8_span),
+            Some(utf8_start..utf8_start + "んに".len())
+        );
+
+        let inside_multibyte = origin_span(Path::new("utf8.md"), (0, 1), (1, 3), (1, 5));
+        assert_eq!(origin_span_to_range(utf8_source, &inside_multibyte), None);
+
+        let missing_line = origin_span(Path::new("crlf.md"), (0, 1), (4, 0), (4, 1));
+        assert_eq!(origin_span_to_range(crlf_source, &missing_line), None);
+
+        let column_past_line = origin_span(Path::new("crlf.md"), (0, 1), (3, 0), (3, 13));
+        assert_eq!(origin_span_to_range(crlf_source, &column_past_line), None);
+
+        let empty = origin_span(Path::new("crlf.md"), (0, 1), (3, 5), (3, 5));
+        assert_eq!(origin_span_to_range(crlf_source, &empty), None);
+
+        let reversed = origin_span(Path::new("crlf.md"), (0, 1), (3, 6), (3, 5));
+        assert_eq!(origin_span_to_range(crlf_source, &reversed), None);
+    }
+
+    #[test]
+    fn translate_span_clips_trailing_synthetic_units() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = "# Before\n\n---\n<!-- {\"include\":\"shared.md\"} -->\n---\n# After\n";
+        let (_, included, expanded) = expand_fixture(dir.path(), source, "shared.md", "# Included");
+        let included_start = expanded.source.find("# Included").unwrap();
+        let generated_newline = included_start + "# Included".len();
+        let following_separator = expanded.source[generated_newline + 2..]
+            .find("---")
+            .unwrap()
+            + generated_newline
+            + 2;
+
+        assert_eq!(
+            expanded
+                .line_map
+                .translate_span(
+                    &expanded.source,
+                    SourceSpan {
+                        start: included_start,
+                        end: following_separator,
+                    },
+                )
+                .unwrap(),
+            origin_span(
+                &included,
+                (included_start, generated_newline),
+                (1, 0),
+                (1, "# Included".len()),
+            )
+        );
+    }
+
+    #[test]
+    fn translate_span_refuses_generated_boundary_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = "# Before\n\n---\n<!-- {\"include\":\"shared.md\"} -->\n---\n# After\n";
+        let (deck, included, expanded) =
+            expand_fixture(dir.path(), source, "shared.md", "# Included");
+
+        let included_origin = expanded
+            .line_map
+            .origins()
+            .iter()
+            .position(|origin| {
+                origin.file == included && origin.kind == LineOriginKind::Source { line: 1 }
+            })
+            .unwrap();
+        assert_eq!(
+            &expanded.line_map.origins()[included_origin - 1..included_origin + 3],
+            &[
+                LineOrigin {
+                    file: deck.clone(),
+                    kind: LineOriginKind::Source { line: 3 },
+                },
+                LineOrigin {
+                    file: included.clone(),
+                    kind: LineOriginKind::Source { line: 1 },
+                },
+                LineOrigin {
+                    file: deck.clone(),
+                    kind: LineOriginKind::SyntheticTerminator,
+                },
+                LineOrigin {
+                    file: deck.clone(),
+                    kind: LineOriginKind::SyntheticLine,
+                },
+            ]
+        );
+
+        let generated_newline = expanded.source.find("# Included").unwrap() + "# Included".len();
+        // This byte is the SyntheticTerminator after an unterminated included line.
+        assert_eq!(
+            expanded.line_map.translate_span(
+                &expanded.source,
+                SourceSpan {
+                    start: generated_newline,
+                    end: generated_newline + 1
+                },
+            ),
+            None
+        );
+
+        let included_start = expanded.source.find("# Included").unwrap();
+        // This span contains only the SyntheticLine blank-line byte.
+        assert_eq!(
+            expanded.line_map.translate_span(
+                &expanded.source,
+                SourceSpan {
+                    start: generated_newline + 1,
+                    end: generated_newline + 2,
+                },
+            ),
+            None
+        );
+
+        let after_start = expanded.source.find("# After").unwrap();
+        // A synthetic byte strictly inside a span is reachable here only while also crossing from
+        // the included file into the top deck, so this is both an internal-synthetic and mixed-file
+        // refusal.
+        assert_eq!(
+            expanded.line_map.translate_span(
+                &expanded.source,
+                SourceSpan {
+                    start: generated_newline - 1,
+                    end: after_start + 1,
+                },
+            ),
+            None
+        );
+
+        // These bytes cross from a top-deck Source entry into an included-file Source entry.
+        assert_eq!(
+            expanded.line_map.translate_span(
+                &expanded.source,
+                SourceSpan {
+                    start: included_start - 1,
+                    end: included_start + 1,
+                },
+            ),
+            None
+        );
+
+        // This span is empty, so start is equal to end.
+        assert_eq!(
+            expanded.line_map.translate_span(
+                &expanded.source,
+                SourceSpan {
+                    start: included_start,
+                    end: included_start,
+                },
+            ),
+            None
+        );
+
+        // This span is reversed, so start is greater than end.
+        assert_eq!(
+            expanded.line_map.translate_span(
+                &expanded.source,
+                SourceSpan {
+                    start: included_start + 1,
+                    end: included_start,
+                },
+            ),
+            None
+        );
+
+        // This span extends beyond the end of the combined source.
+        assert_eq!(
+            expanded.line_map.translate_span(
+                &expanded.source,
+                SourceSpan {
+                    start: expanded.source.len(),
+                    end: expanded.source.len() + 1,
+                },
+            ),
+            None
+        );
+
+        let utf8_source = "# こんにちは\n";
+        let utf8 = expand_includes(utf8_source, 0, Path::new("utf8.md")).unwrap();
+        let first_multibyte = utf8_source.find('こ').unwrap();
+        // This span starts inside a UTF-8 code point rather than at a character boundary.
+        assert_eq!(
+            utf8.line_map.translate_span(
+                &utf8.source,
+                SourceSpan {
+                    start: first_multibyte + 1,
+                    end: utf8.source.len(),
+                },
+            ),
+            None
+        );
+        // This span ends inside a UTF-8 code point rather than at a character boundary.
+        assert_eq!(
+            utf8.line_map.translate_span(
+                &utf8.source,
+                SourceSpan {
+                    start: 0,
+                    end: first_multibyte + 1,
+                },
+            ),
+            None
+        );
+
+        let mut mismatched_map = utf8.line_map.clone();
+        mismatched_map.origins.pop();
+        // The origin walk ends before the combined source, so the map is inconsistent.
+        assert_eq!(
+            mismatched_map.translate_span(
+                &utf8.source,
+                SourceSpan {
+                    start: 0,
+                    end: "# ".len(),
+                },
+            ),
+            None
+        );
+
+        let nonconsecutive_source = "# One\n# Two\n";
+        let mut nonconsecutive_map =
+            LineMap::for_source(nonconsecutive_source, Path::new("nonconsecutive.md"));
+        nonconsecutive_map.origins[1].kind = LineOriginKind::Source { line: 3 };
+        // These same-file Source entries have non-consecutive original line numbers.
+        assert_eq!(
+            nonconsecutive_map.translate_span(
+                nonconsecutive_source,
+                SourceSpan {
+                    start: 0,
+                    end: nonconsecutive_source.len(),
+                },
+            ),
+            None
         );
     }
 
@@ -1204,6 +1976,29 @@ mod tests {
     }
 
     #[test]
+    fn included_bom_does_not_bypass_boundary_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let included = dir.path().join("inc.md");
+        let source = "<!-- {\"include\":\"inc.md\"} -->\n---\n# After\n";
+
+        fs::write(&included, "```\ncode").unwrap();
+        let without_bom = expand_includes(source, 0, &deck).unwrap_err();
+        fs::write(&included, "\u{feff}```\ncode").unwrap();
+        let with_bom = expand_includes(source, 0, &deck).unwrap_err();
+
+        assert_eq!(with_bom.line, Some(1));
+        assert_eq!(with_bom.line, without_bom.line);
+        assert_eq!(with_bom.origin_file, Some(included));
+        assert_eq!(with_bom.message, without_bom.message);
+        assert_eq!(
+            with_bom.message,
+            "included file ends inside an unclosed code fence"
+        );
+        assert_eq!(with_bom.help, without_bom.help);
+    }
+
+    #[test]
     fn unclosed_html_comment_in_included_file_is_error() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
@@ -1323,6 +2118,39 @@ mod tests {
         assert!(expanded.line_map.origins.iter().any(|origin| {
             origin.file == deck && origin.kind == LineOriginKind::SyntheticTerminator
         }));
+    }
+
+    #[test]
+    fn include_after_crlf_frontmatter_keeps_separator_on_its_own_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let included = dir.path().join("shared.md");
+        let included_source = "# Included\n";
+        fs::write(&included, included_source).unwrap();
+        let source =
+            "---\r\ntime: 1m\r\n---\r\n<!-- {\"include\":\"shared.md\"} -->\r\n---\r\n# Plain\r\n";
+        let frontmatter = crate::parser::parse_frontmatter(source).unwrap();
+
+        let expanded = expand_includes(source, frontmatter.body_start(), &deck).unwrap();
+
+        assert!(expanded
+            .source
+            .starts_with("---\r\ntime: 1m\r\n---\n# Included\n"));
+        let closing_separator_end = "---\r\ntime: 1m\r\n---".len();
+        assert_eq!(
+            &expanded.source[closing_separator_end..closing_separator_end + 1],
+            "\n"
+        );
+        assert!(expanded.line_map.origins().iter().any(|origin| {
+            origin.file == deck && origin.kind == LineOriginKind::SyntheticTerminator
+        }));
+        assert_parsed_slide_spans_translate(
+            &expanded,
+            &[
+                (included.as_path(), included_source),
+                (deck.as_path(), source),
+            ],
+        );
     }
 
     #[test]

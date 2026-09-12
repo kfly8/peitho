@@ -134,22 +134,56 @@ slide's bytes unchanged.
 
 ### Core: mapping spans back to the origin file
 
-The parsed source is the include-expanded combined source. A new helper on
-`include::LineMap` translates a combined-source byte span into
-`(PathBuf, Range<usize>)` in the origin file:
+The parsed source is the include-expanded combined source. A helper on
+`include::LineMap` translates a combined-source byte span into an
+`OriginSpan` (origin file plus line/byte-column coordinates), and
+`origin_span_to_range` converts those coordinates against a separately read
+origin file into an exact byte range (revised 2026-09-12 during Task 3
+review):
 
-- Every line the span touches must be a `LineOriginKind::Source` line of the
-  same file. Otherwise the result is `None` and the CLI refuses the save
-  ("this slide cannot be edited from preview; edit the note in `<file>`").
-  Synthetic lines only occur at include boundaries, so this never fires for
-  a plain deck and only for degenerate include shapes.
+- Synthetic bytes (a generated terminating newline after an included file
+  without one, a generated blank line before a following `---`, or the
+  terminator that expansion rewrites at the frontmatter boundary) are bytes the
+  origin file lacks or whose terminator expansion rewrote. A
+  `ParsedSlide.source_span` routinely ends on one (the last slide of an included
+  file followed by `---`) or starts on one (the first slide after frontmatter
+  when it is an include), so `translate_span` clips synthetic bytes off both
+  ends of the span and reports the clipped combined sub-span as
+  `OriginSpan::combined`, whose bytes are byte-for-byte the origin bytes. The
+  result is `None` only when a synthetic byte lies strictly inside the span,
+  when the span touches two files, when lines are not consecutive, or when
+  nothing but synthetic bytes remains; then the CLI refuses the save ("this
+  slide cannot be edited from preview; edit the note in `<file>`").
 - Column offsets are preserved because include expansion splices whole
   lines.
+- Coordinates are `LineCol { line, byte_col }` (1-based line, 0-based byte
+  column). The span end is exclusive and is expressed on the line of the last
+  byte covered, so a span that ends with a line's terminator has `byte_col`
+  equal to that line's length including the terminator, and a span ending at
+  EOF is representable. `origin_span_to_range` accepts a byte column up to
+  and including that length, refuses anything beyond it, and refuses an
+  offset that is not a char boundary (the origin may have changed on disk).
+- Byte columns are relative to the BOM-stripped origin bytes.
+  `expand_includes` strips one leading BOM from every source it reads (top
+  deck and included files, at the read seam, before the included-file
+  validators) so `body_start` and the combined source agree;
+  `origin_span_to_range` skips a leading BOM in the origin text it is given
+  and offsets the range past it, so the CLI indexes the raw file bytes.
+- The rewritten slide is taken from
+  `rewritten[combined.start..slide.source_span.end +
+  rewritten.len() - combined_source.len()]` (add before subtracting, the rewrite
+  may shrink the source): a leading synthetic byte is never touched by the
+  rewrite and is skipped, while trailing synthetic bytes (a generated terminator
+  and a generated blank line) that the rewrite leaves in place become real bytes
+  in the origin (a one-time whitespace normalization; the next expansion then
+  needs no synthetic bytes there). Because the combined source mixes files, the
+  CLI converts the new slide bytes to the origin's line ending (CRLF when the
+  origin contains `\r\n`, LF otherwise), and a save whose rewritten combined
+  source equals the input writes nothing at all (this is what keeps a save of
+  unchanged text a no-op even when trailing synthetic bytes exist).
 
 For a deck without includes the map is the identity and the origin file is
-the deck itself. `parse_markdown` strips a leading BOM before computing
-offsets, so the CLI strips it the same way before applying the rewrite and
-re-adds it on write.
+the deck itself.
 
 ### CLI: parse-for-notes and the writer
 

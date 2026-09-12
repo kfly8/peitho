@@ -296,6 +296,7 @@ pub struct LineCol {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OriginSpan {
     pub file: PathBuf,
+    pub combined: SourceSpan, // added in the revision below
     pub start: LineCol,
     pub end: LineCol,
 }
@@ -328,6 +329,21 @@ source file.
 `origin_span_to_range` indexes `origin_source` by the two line/byte-column
 coordinates and returns `None` when either line or byte column does not exist.
 It otherwise returns the exact byte range, including for UTF-8 and CRLF text.
+
+**Revision (2026-09-12, PR for this task).** Review measured that
+`ParsedSlide.source_span` ends on a `SyntheticLine` byte for the last slide of
+an included file followed by `---`, and starts on a `SyntheticTerminator` for
+a first slide after frontmatter that is an include, so the literal
+"every intersected byte is `Source`" rule refused the primary include use
+case. `translate_span` therefore clips synthetic bytes off both ends and
+reports the clipped sub-span as `OriginSpan::combined`; `None` remains for a
+synthetic byte strictly inside, mixed files, non-consecutive lines, invalid
+bounds, or nothing but synthetic bytes. `origin_span_to_range` also refuses
+offsets off a char boundary. The same review found and fixed a pre-existing
+expansion bug: with CRLF frontmatter the region start is `\r\n`, which the
+leading-newline helper did not recognize, so an included first line was glued
+onto the closing `---`. The design record carries the revised rules and the
+splice formula Task 6 must use.
 
 **Verification.**
 
@@ -532,8 +548,9 @@ The boxed closure owns a `Mutex<()>` and holds it for the complete
 read/parse/rewrite/write transaction; it captures no parsed deck, source
 position, or content hash. For each call:
 
-1. Call `load_and_expand_deck_source(input)`, strip one leading BOM from the
-   combined string into `combined_source`, resolve the shared highlighter, and
+1. Call `load_and_expand_deck_source(input)`, bind the combined string as
+   `combined_source` (expansion has already stripped every leading BOM),
+   resolve the shared highlighter, and
    pass the `peitho_core::parse_deck` result through
    `LoadedDeckSource::translate`. Do not call the transform entry point.
 2. Find the `ParsedSlide` whose `slide.key.as_str() == key`; a miss is a 409
@@ -543,24 +560,36 @@ position, or content hash. For each call:
    spans (revised 2026-09-12 in Task 2: `rewrite_note` re-parses the text it
    is given, so it must see the whole deck — an origin file parsed alone
    lacks the top deck's frontmatter and still carries `include` comments).
-   Bytes outside the slide span are unchanged by contract. Strip one leading
-   BOM from both `combined_source` and `rewritten` before slicing (the spans
-   are relative to the stripped text and `rewrite_note` restores the BOM on
-   return); the rewritten slide is then
-   `rewritten[slide.source_span.start..slide.source_span.end +
-   (rewritten.len() - combined_source.len())]`.
+   Bytes outside the slide span are unchanged by contract. If `rewritten ==
+   combined_source`, return success without touching any file (a same-text
+   save must not rewrite an origin whose slide carries trailing synthetic
+   bytes).
 4. Call `loaded.line_map.translate_span(&combined_source, slide.source_span)`
-   for the slide span only (note spans need no translation). Require `Some`;
-   bind `OriginSpan::file` as `origin_path`. Read it once, strip and remember
-   its leading BOM as `origin_source`, then convert the span with
-   `origin_span_to_range(&origin_source, &span)`. On a refused translation or
-   failed coordinate conversion, return a conflict `BuildError` at the
-   translated slide start line and `origin_for_display(&origin_path, input)`,
-   with message `this slide cannot be edited from preview`, and help built as
-   `format!("edit the note in {}", origin_path.display())`. Splice the
-   rewritten slide bytes into `origin_source` at that range.
-5. Re-add the BOM byte-for-byte and call `server::write_atomic` in the origin
-   directory.
+   for the slide span only (note spans need no translation) and bind the
+   `OriginSpan` as `span`. On `None`, take `(origin_path, line)` from
+   `loaded.line_map.translate(<combined line of slide.source_span.start>)`
+   and return a conflict `BuildError` at that line with
+   `origin_for_display(&origin_path, input)`, message `this slide cannot be
+   edited from preview`, and help built as
+   `format!("edit the note in {}", origin_path.display())`. On `Some`, bind
+   `span.file` as `origin_path`, read it once as `origin_source` (raw bytes
+   as read; `origin_span_to_range` skips a leading BOM itself), convert with
+   `origin_span_to_range(&origin_source, &span)`, and require
+   `origin_source[range] == combined_source[span.combined]`; a failed
+   conversion or a mismatch (the file changed since it was expanded) is the
+   same conflict.
+5. Take the rewritten slide as
+   `rewritten[span.combined.start..slide.source_span.end +
+   rewritten.len() - combined_source.len()]` (add before subtracting; the
+   rewrite may shrink the source; `combined.start` skips a leading synthetic
+   byte, see the design record's mapping section revised in Task 3). Convert
+   those bytes to the origin's line ending: when `origin_source` contains
+   `\r\n`, `replace("\r\n", "\n")` then `replace('\n', "\r\n")`;
+   otherwise `replace("\r\n", "\n")` (`rewrite_note` picks its ending from
+   the whole combined source, which mixes files, and materialized synthetic
+   bytes are bare LF). Splice them into `origin_source` at `range` (the BOM,
+   if any, stays in place by construction) and call `server::write_atomic`
+   in the origin directory.
 
 Classify a report with the typed check
 `report.downcast_ref::<DeckDiagnostic>().is_some()` as `Conflict`; do not match
@@ -582,7 +611,7 @@ line numbers: translate it through the combined `LineMap` like any other
 parse report before formatting. Construct the missing-key conflict with message
 `slide key '{key}' not found in current deck` and help
 `reload preview and retry on a slide whose key still exists`; construct the
-span conflict with the message/help fixed in step 3. Wrap origin read and write
+span conflict with the message/help fixed in step 4. Wrap origin read and write
 errors in reports whose help says respectively `make the file readable and
 retry` and `make the file and its directory writable and retry`, then flatten
 them through `plain_diagnostic_text`.
