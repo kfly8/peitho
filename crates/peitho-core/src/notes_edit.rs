@@ -136,24 +136,30 @@ fn restore_bom(source: String, had_bom: bool) -> String {
 
 fn splice_note(source: &str, slide: SourceSpan, notes: &[SourceSpan], text: &str) -> String {
     if notes.is_empty() {
-        let line_ending = source_line_ending(source);
+        let line_ending = append_line_ending(source, slide);
         let comment = canonical_comment(text, line_ending);
         return append_comment(source, slide, &comment, line_ending);
     }
 
-    let line_ending = source_line_ending(source);
-    let comment = (!text.is_empty()).then(|| canonical_comment(text, line_ending));
-    let in_place: Option<&str> = comment.as_deref().filter(|_| {
-        let line = line_context(source, notes[0]);
-        line.whole_line && notes[0].start == line.start
-    });
+    let first_line = line_context(source, notes[0]);
+    let in_place_comment = (!text.is_empty()
+        && first_line.whole_line
+        && notes[0].start == first_line.start)
+        .then(|| {
+            let line_ending = first_line
+                .terminator
+                .as_ref()
+                .map(|terminator| terminator_line_ending(source, terminator))
+                .unwrap_or_else(|| source_line_ending(source, slide));
+            canonical_comment(text, line_ending)
+        });
     let mut rewritten = source.to_owned();
     let mut removed_bytes = 0;
 
     for (index, span) in notes.iter().enumerate().rev() {
         let line = line_context(source, *span);
         if index == 0 {
-            if let Some(replacement) = in_place {
+            if let Some(replacement) = in_place_comment.as_deref() {
                 let mut replacement = replacement.to_owned();
                 if let Some(terminator) = &line.terminator {
                     replacement.push_str(&source[terminator.clone()]);
@@ -168,21 +174,44 @@ fn splice_note(source: &str, slide: SourceSpan, notes: &[SourceSpan], text: &str
         rewritten.replace_range(range, &replacement);
     }
 
-    if in_place.is_none() {
-        if let Some(comment) = comment {
-            let adjusted_slide = SourceSpan {
-                start: slide.start,
-                end: slide.end - removed_bytes,
-            };
-            return append_comment(&rewritten, adjusted_slide, &comment, line_ending);
-        }
+    if in_place_comment.is_none() && !text.is_empty() {
+        let adjusted_slide = SourceSpan {
+            start: slide.start,
+            end: slide.end - removed_bytes,
+        };
+        let line_ending = append_line_ending(&rewritten, adjusted_slide);
+        let comment = canonical_comment(text, line_ending);
+        return append_comment(&rewritten, adjusted_slide, &comment, line_ending);
     }
 
     rewritten
 }
 
-fn source_line_ending(source: &str) -> &'static str {
-    if source.contains("\r\n") {
+fn source_line_ending(source: &str, slide: SourceSpan) -> &'static str {
+    if source[slide.start..slide.end].contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+fn append_line_ending(source: &str, slide: SourceSpan) -> &'static str {
+    last_nonblank_line_end(source, slide)
+        .and_then(|end| {
+            let tail = &source[end..slide.end];
+            if tail.starts_with("\r\n") {
+                Some("\r\n")
+            } else if tail.starts_with('\n') {
+                Some("\n")
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| source_line_ending(source, slide))
+}
+
+fn terminator_line_ending(source: &str, terminator: &Range<usize>) -> &'static str {
+    if source[terminator.clone()].starts_with('\r') {
         "\r\n"
     } else {
         "\n"
@@ -750,6 +779,134 @@ mod tests {
                 || (index > 0 && once.as_bytes()[index - 1] == b'\r')));
 
         assert_idempotent(&once, text, &highlighter, 0);
+    }
+
+    #[test]
+    fn rewrite_note_uses_the_slides_own_line_ending() {
+        let source = concat!(
+            "<!-- {\"key\":\"first\"} -->\r\n",
+            "# First\r\n\r\n",
+            "<!-- old first -->\r\n",
+            "---\n",
+            "<!-- {\"key\":\"second\"} -->\n",
+            "# Second\n\n",
+            "<!-- old second -->\n",
+        );
+        let highlighter = Highlighter::defaults();
+        let deck = parse(source, &highlighter);
+
+        let second = &deck.parsed_slides()[1];
+        assert_eq!(
+            rewrite_note(
+                source,
+                second.source_span,
+                &second.note_spans,
+                "new\nnote",
+                &highlighter,
+            )
+            .unwrap(),
+            concat!(
+                "<!-- {\"key\":\"first\"} -->\r\n",
+                "# First\r\n\r\n",
+                "<!-- old first -->\r\n",
+                "---\n",
+                "<!-- {\"key\":\"second\"} -->\n",
+                "# Second\n\n",
+                "<!--\nnew\nnote\n-->\n",
+            )
+        );
+
+        let first = &deck.parsed_slides()[0];
+        assert_eq!(
+            rewrite_note(
+                source,
+                first.source_span,
+                &first.note_spans,
+                "new\nnote",
+                &highlighter,
+            )
+            .unwrap(),
+            concat!(
+                "<!-- {\"key\":\"first\"} -->\r\n",
+                "# First\r\n\r\n",
+                "<!--\r\nnew\r\nnote\r\n-->\r\n",
+                "---\n",
+                "<!-- {\"key\":\"second\"} -->\n",
+                "# Second\n\n",
+                "<!-- old second -->\n",
+            )
+        );
+    }
+
+    #[test]
+    fn rewrite_note_takes_the_terminator_from_the_replaced_line() {
+        let source = "<!-- {\"key\":\"a\"} -->\r\n# A\n\n<!-- old -->\n";
+        let highlighter = Highlighter::defaults();
+        let deck = parse(source, &highlighter);
+        let slide = &deck.parsed_slides()[0];
+
+        assert_eq!(
+            rewrite_note(
+                source,
+                slide.source_span,
+                &slide.note_spans,
+                "m1\nm2",
+                &highlighter,
+            )
+            .unwrap(),
+            "<!-- {\"key\":\"a\"} -->\r\n# A\n\n<!--\nm1\nm2\n-->\n"
+        );
+
+        let append_source = "<!-- {\"key\":\"append\"} -->\n# Append\r\n";
+        let deck = parse(append_source, &highlighter);
+        let slide = &deck.parsed_slides()[0];
+        assert_eq!(
+            rewrite_note(
+                append_source,
+                slide.source_span,
+                &slide.note_spans,
+                "m1\nm2",
+                &highlighter,
+            )
+            .unwrap(),
+            concat!(
+                "<!-- {\"key\":\"append\"} -->\n",
+                "# Append\r\n\r\n",
+                "<!--\r\nm1\r\nm2\r\n-->\r\n",
+            )
+        );
+    }
+
+    #[test]
+    fn rewrite_note_append_ending_ignores_removed_note_lines() {
+        let highlighter = Highlighter::defaults();
+        let cases = [
+            (
+                "# A\nbody\n\n> <!-- n -->\r\n",
+                "# A\nbody\n\n<!--\na\nb\n-->\n",
+            ),
+            (
+                "# A\nbody <!-- first --> text\n\n> <!-- last -->\r\n",
+                "# A\nbody  text\n\n<!--\na\nb\n-->\n",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let deck = parse(source, &highlighter);
+            let slide = &deck.parsed_slides()[0];
+
+            assert_eq!(
+                rewrite_note(
+                    source,
+                    slide.source_span,
+                    &slide.note_spans,
+                    "a\nb",
+                    &highlighter,
+                )
+                .unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]

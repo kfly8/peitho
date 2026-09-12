@@ -192,11 +192,12 @@ Use the first note's line, or the slide's first line when there is no note, on
 both `BuildError`s.
 
 Choose `\r\n` for inserted lines when the file contains `\r\n`, otherwise
-choose `\n`; normalize internal `\r\n` and lone `\r` to `\n` before joining
-submitted lines with that choice. Empty trimmed text removes all note spans.
-One logical line becomes `<!-- text -->`; two or more become `<!--`, the text,
-and `-->` on separate lines. Detect whether each span is the only
-non-whitespace content across its source line or lines. For a whole-line
+choose `\n` (revised in Task 6: the replaced or preceding line's terminator
+wins, then the slide's bytes); normalize internal `\r\n` and lone `\r` to `\n`
+before joining submitted lines with that choice. Empty trimmed text removes all
+note spans. One logical line becomes `<!-- text -->`; two or more become
+`<!--`, the text, and `-->` on separate lines. Detect whether each span is the
+only non-whitespace content across its source line or lines. For a whole-line
 replacement, preserve whitespace before `span.start` but consume trailing
 whitespace and the existing terminator; for a whole-line removal, consume from
 the first line's start through the last line's terminator so an indented
@@ -566,7 +567,7 @@ Add these functions in `main.rs`:
 ```rust
 fn write_preview_note(
     input: &Path,
-    key: &str,
+    key: &SlideKey, // revised in Task 5: the route validates the key
     text: &str,
 ) -> Result<(), server::NotesWriteError>;
 fn preview_notes_writer(input: PathBuf) -> server::NotesWriter;
@@ -583,7 +584,7 @@ validated `&SlideKey`; compare it with `slide.key == *key`. For each call:
    resolve the shared highlighter, and
    pass the `peitho_core::parse_deck` result through
    `LoadedDeckSource::translate`. Do not call the transform entry point.
-2. Find the `ParsedSlide` whose `slide.key.as_str() == key`; a miss is a 409
+2. Find the `ParsedSlide` whose `slide.key == *key`; a miss is a 409
    conflict whose message contains the requested key.
 3. Call `rewrite_note(&combined_source, slide.source_span, &slide.note_spans,
    text, &highlighter)` on the combined source with the `ParsedSlide`'s own
@@ -612,14 +613,15 @@ validated `&SlideKey`; compare it with `slide.key == *key`. For each call:
    `rewritten[span.combined.start..slide.source_span.end +
    rewritten.len() - combined_source.len()]` (add before subtracting; the
    rewrite may shrink the source; `combined.start` skips a leading synthetic
-   byte, see the design record's mapping section revised in Task 3). Convert
-   those bytes to the origin's line ending: when `origin_source` contains
-   `\r\n`, `replace("\r\n", "\n")` then `replace('\n', "\r\n")`;
-   otherwise `replace("\r\n", "\n")` (`rewrite_note` picks its ending from
-   the whole combined source, which mixes files, and materialized synthetic
-   bytes are bare LF). Splice them into `origin_source` at `range` (the BOM,
-   if any, stays in place by construction) and call `server::write_atomic`
-   in the origin directory.
+   byte, see the design record's mapping section revised in Task 3).
+   `rewrite_note` picks its line ending from the replaced or preceding line
+   (falling back to the slide's bytes), so only
+   materialized synthetic bytes can be bare LF in a CRLF origin: when
+   `origin_source` contains `\r\n` and no bare `\n`, convert bare `\n`
+   to `\r\n`; otherwise leave the bytes as produced. If the result equals
+   `origin_source[range]`, return success without writing. Splice them into
+   `origin_source` at `range` (the BOM, if any, stays in place by
+   construction) and call `server::write_atomic` in the origin directory.
 
 Classify a report with the typed check
 `report.downcast_ref::<DeckDiagnostic>().is_some()` as `Conflict`; do not match

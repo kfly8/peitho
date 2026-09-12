@@ -3538,7 +3538,10 @@ fn is_html_comment(raw: &str) -> bool {
     trimmed.starts_with("<!--") && trimmed.ends_with("-->")
 }
 
-pub(crate) fn line_for_offset(source: &str, offset: usize) -> usize {
+/// Returns the 1-based line containing the byte at `offset`.
+///
+/// `offset` must be within `source` and on a UTF-8 character boundary; slicing panics otherwise.
+pub fn line_for_offset(source: &str, offset: usize) -> usize {
     source[..offset]
         .bytes()
         .filter(|byte| *byte == b'\n')

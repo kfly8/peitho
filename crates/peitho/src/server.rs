@@ -795,8 +795,8 @@ impl PresentServer {
         );
     }
 
-    fn respond_notes_post(&self, mut request: tiny_http::Request) {
-        let Some(writer) = self.notes_writer.as_deref() else {
+    fn respond_notes_post(&self, request: tiny_http::Request) {
+        let Some(writer) = self.notes_writer.as_ref() else {
             send_response(
                 request,
                 Response::from_string("404\n").with_status_code(StatusCode(404)),
@@ -812,42 +812,50 @@ impl PresentServer {
             return;
         }
 
-        let mut body = String::new();
-        let notes = request
-            .as_reader()
-            .read_to_string(&mut body)
-            .ok()
-            .and_then(|_| serde_json::from_str::<NotesRequest>(&body).ok());
-        let Some(notes) = notes else {
-            send_response(
-                request,
-                Response::from_string("invalid notes body\n").with_status_code(StatusCode(400)),
-            );
-            return;
-        };
-
-        let mut writer = writer
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let result = writer(&notes.key, &notes.text);
-        match result {
-            Ok(()) => send_json_response(request, serde_json::json!({ "saved": true }).to_string()),
-            Err(err) => {
-                let (status, message) = match err {
-                    NotesWriteError::Conflict(message) => (409, message),
-                    NotesWriteError::Unprocessable(message) => (422, message),
-                    NotesWriteError::Io(message) => {
-                        eprintln!("warning: failed to write speaker note: {message}");
-                        (500, message)
-                    }
-                };
-                send_json_response_with_status(
+        let writer = Arc::clone(writer);
+        thread::spawn(move || {
+            let mut request = request;
+            let mut body = String::new();
+            let notes = request
+                .as_reader()
+                .read_to_string(&mut body)
+                .ok()
+                .and_then(|_| serde_json::from_str::<NotesRequest>(&body).ok());
+            let Some(notes) = notes else {
+                send_response(
                     request,
-                    status,
-                    serde_json::json!({ "error": message }).to_string(),
+                    Response::from_string("invalid notes body\n").with_status_code(StatusCode(400)),
                 );
+                return;
+            };
+
+            let result = {
+                let mut writer = writer
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                writer(&notes.key, &notes.text)
+            };
+            match result {
+                Ok(()) => {
+                    send_json_response(request, serde_json::json!({ "saved": true }).to_string())
+                }
+                Err(err) => {
+                    let (status, message) = match err {
+                        NotesWriteError::Conflict(message) => (409, message),
+                        NotesWriteError::Unprocessable(message) => (422, message),
+                        NotesWriteError::Io(message) => {
+                            eprintln!("warning: failed to write speaker note: {message}");
+                            (500, message)
+                        }
+                    };
+                    send_json_response_with_status(
+                        request,
+                        status,
+                        serde_json::json!({ "error": message }).to_string(),
+                    );
+                }
             }
-        }
+        });
     }
 
     fn respond_static(&self, request: tiny_http::Request) {

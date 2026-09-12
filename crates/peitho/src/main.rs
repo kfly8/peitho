@@ -1,6 +1,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashSet},
     env,
     error::Error,
@@ -37,6 +38,7 @@ mod new_cmd;
 use asset_resolution::{resolve_assets, Provenance, ResolvedAssets};
 use diagnostics::{plain_diagnostic_text, render_diagnostic, DeckDiagnostic};
 use peitho::{browser, server};
+use peitho_core::domain::SlideKey;
 
 struct BuildArtifacts {
     slide_count: usize,
@@ -1924,10 +1926,18 @@ fn load_css(css_path: Option<&Path>) -> miette::Result<Vec<peitho_core::CssFile>
     Ok(files)
 }
 
+fn resolve_assets_and_highlighter(
+    input: &Path,
+    frontmatter: &peitho_core::ParsedFrontmatter,
+) -> miette::Result<(ResolvedAssets, peitho_core::highlight::Highlighter)> {
+    let assets = resolve_assets(input, frontmatter)?;
+    let highlighter = load_highlighter(assets.syntaxes.path())?;
+    Ok((assets, highlighter))
+}
+
 fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
     let loaded = load_and_expand_deck_source(input)?;
-    let assets = resolve_assets(input, &loaded.frontmatter)?;
-    let highlighter = load_highlighter(assets.syntaxes.path())?;
+    let (assets, highlighter) = resolve_assets_and_highlighter(input, &loaded.frontmatter)?;
     let layouts = load_layouts(assets.layouts.path())?;
     let css_files = load_css(assets.css.path())?;
     let parsed = loaded.translate(peitho_core::code_images::parse_deck_and_transform(
@@ -1981,6 +1991,174 @@ pub(crate) fn load_and_expand_deck_source(input: &Path) -> miette::Result<Loaded
         frontmatter,
         line_map: expanded.line_map,
     })
+}
+
+fn classify_preview_notes_report(report: miette::Report) -> server::NotesWriteError {
+    let is_conflict = report.downcast_ref::<DeckDiagnostic>().is_some();
+    let message = plain_diagnostic_text(&report);
+    if is_conflict {
+        server::NotesWriteError::Conflict(message)
+    } else {
+        server::NotesWriteError::Io(message)
+    }
+}
+
+fn preview_notes_conflict(error: peitho_core::BuildError) -> server::NotesWriteError {
+    let report = miette::Report::new(DeckDiagnostic::new(error));
+    server::NotesWriteError::Conflict(plain_diagnostic_text(&report))
+}
+
+fn preview_notes_span_conflict(input: &Path, file: &Path, line: usize) -> server::NotesWriteError {
+    preview_notes_conflict(
+        peitho_core::BuildError::new(
+            peitho_core::error::ErrorKind::Parse,
+            Some(line),
+            "this slide cannot be edited from preview",
+            format!("edit the note in {}", file.display()),
+        )
+        .with_origin_file(origin_for_display(file, input)),
+    )
+}
+
+fn preview_notes_io(
+    action: &str,
+    path: &Path,
+    help: &str,
+    err: io::Error,
+) -> server::NotesWriteError {
+    let report = miette::miette!(
+        help = help.to_owned(),
+        "failed to {action} {}\ncaused by: {err}",
+        path.display()
+    );
+    server::NotesWriteError::Io(plain_diagnostic_text(&report))
+}
+
+fn contains_bare_lf(source: &str) -> bool {
+    source.as_bytes().iter().enumerate().any(|(index, byte)| {
+        *byte == b'\n' && (index == 0 || source.as_bytes()[index - 1] != b'\r')
+    })
+}
+
+fn convert_bare_lf_to_crlf(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut converted = String::with_capacity(source.len());
+    for (index, character) in source.char_indices() {
+        if character == '\n' && (index == 0 || bytes[index - 1] != b'\r') {
+            converted.push('\r');
+        }
+        converted.push(character);
+    }
+    converted
+}
+
+fn write_preview_note(
+    input: &Path,
+    key: &SlideKey,
+    text: &str,
+) -> Result<(), server::NotesWriteError> {
+    let loaded = load_and_expand_deck_source(input).map_err(classify_preview_notes_report)?;
+    let (_, highlighter) = resolve_assets_and_highlighter(input, &loaded.frontmatter)
+        .map_err(classify_preview_notes_report)?;
+    let combined_source = loaded.source.as_str();
+    let parsed = loaded
+        .translate(peitho_core::parse_deck(
+            combined_source,
+            loaded.frontmatter.clone(),
+            &highlighter,
+        ))
+        .map_err(classify_preview_notes_report)?;
+
+    let Some(slide) = parsed
+        .parsed_slides()
+        .iter()
+        .find(|slide| slide.key == *key)
+    else {
+        return Err(preview_notes_conflict(peitho_core::BuildError::new(
+            peitho_core::error::ErrorKind::Parse,
+            None,
+            format!("slide key '{}' not found in current deck", key.as_str()),
+            "reload preview and retry on a slide whose key still exists",
+        )));
+    };
+
+    let rewritten = loaded
+        .translate(peitho_core::notes_edit::rewrite_note(
+            combined_source,
+            slide.source_span,
+            &slide.note_spans,
+            text,
+            &highlighter,
+        ))
+        .map_err(|report| server::NotesWriteError::Unprocessable(plain_diagnostic_text(&report)))?;
+    if rewritten == combined_source {
+        return Ok(());
+    }
+
+    let span = match loaded
+        .line_map
+        .translate_span(combined_source, slide.source_span)
+    {
+        Some(span) => span,
+        None => {
+            let combined_line =
+                peitho_core::parser::line_for_offset(combined_source, slide.source_span.start);
+            let (origin_path, origin_line) = loaded.line_map.translate(combined_line);
+            return Err(preview_notes_span_conflict(
+                input,
+                &origin_path,
+                origin_line,
+            ));
+        }
+    };
+    let origin_path = &span.file;
+    let mut origin_source = fs::read_to_string(origin_path).map_err(|err| {
+        preview_notes_io("read", origin_path, "make the file readable and retry", err)
+    })?;
+    let Some(range) = peitho_core::include::origin_span_to_range(&origin_source, &span) else {
+        return Err(preview_notes_span_conflict(
+            input,
+            origin_path,
+            span.start.line,
+        ));
+    };
+    if origin_source.get(range.clone())
+        != combined_source.get(span.combined.start..span.combined.end)
+    {
+        return Err(preview_notes_span_conflict(
+            input,
+            origin_path,
+            span.start.line,
+        ));
+    }
+
+    // `rewrite_note` never touches bytes outside `slide.source_span`;
+    // `span.combined.start` skips a clipped leading synthetic byte; trailing synthetic bytes the
+    // rewrite leaves in place are written into the origin on purpose (design record, mapping section).
+    let rewritten_slide_end = slide.source_span.end + rewritten.len() - combined_source.len();
+    let rewritten_slide = &rewritten[span.combined.start..rewritten_slide_end];
+    let rewritten_slide: Cow<'_, str> =
+        if origin_source.contains("\r\n") && !contains_bare_lf(&origin_source) {
+            Cow::Owned(convert_bare_lf_to_crlf(rewritten_slide))
+        } else {
+            Cow::Borrowed(rewritten_slide)
+        };
+    if origin_source.get(range.clone()) == Some(rewritten_slide.as_ref()) {
+        return Ok(());
+    }
+    origin_source.replace_range(range, rewritten_slide.as_ref());
+    server::write_atomic(origin_path, origin_source.as_bytes()).map_err(|err| {
+        preview_notes_io(
+            "write",
+            origin_path,
+            "make the file and its directory writable and retry",
+            err,
+        )
+    })
+}
+
+fn preview_notes_writer(input: PathBuf) -> server::NotesWriter {
+    Box::new(move |key, text| write_preview_note(&input, key, text))
 }
 
 fn read_deck_source(input: &Path) -> miette::Result<String> {
@@ -4219,7 +4397,8 @@ fn preview(options: PreviewOptions) -> miette::Result<()> {
         emit_initial_preview_root(&options.input, &cache, &mut std::io::stderr())
     })?;
 
-    let server = server::PresentServer::bind(root, options.port, "index.html")?;
+    let server = server::PresentServer::bind(root, options.port, "index.html")?
+        .with_notes_writer(preview_notes_writer(options.input.clone()));
     let url = server.preview_url();
     let _watch = spawn_preview_watch(watch, cache, server.clone());
     println!("serving preview at {url}");
@@ -5248,6 +5427,384 @@ contexts:
         let artifacts = build_artifacts(&deck).unwrap();
 
         assert!(artifacts.rendered.slides()[0].html().contains("hl-"));
+    }
+
+    #[test]
+    fn preview_notes_writer_reparses_and_rewrites_the_current_deck() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(
+            &deck,
+            concat!(
+                "<!-- {\"key\":\"one\"} -->\r\n",
+                "# One\r\n\r\n",
+                "<!-- first note -->\r\n",
+                "---\n",
+                "<!-- {\"key\":\"two\"} -->\n",
+                "# Two before writer construction\n\n",
+                "<!-- stale note -->\n",
+            ),
+        )
+        .unwrap();
+        let mut writer = preview_notes_writer(deck.clone());
+        let current_source = concat!(
+            "<!-- {\"key\":\"one\"} -->\r\n",
+            "# One\r\n\r\n",
+            "<!-- first note -->\r\n",
+            "---\n",
+            "<!-- {\"key\":\"two\"} -->\n",
+            "# Two from the live file\n\n",
+            "<!-- current note -->\n",
+        );
+        fs::write(&deck, current_source).unwrap();
+
+        writer(
+            &peitho_core::domain::SlideKey::new("two").unwrap(),
+            "edited\nnote",
+        )
+        .unwrap();
+
+        let expected = current_source.replace("<!-- current note -->", "<!--\nedited\nnote\n-->");
+        assert_eq!(fs::read_to_string(&deck).unwrap(), expected);
+
+        fs::create_dir(dir.path().join("deck.md.tmp")).unwrap();
+        writer(
+            &peitho_core::domain::SlideKey::new("two").unwrap(),
+            "edited\nnote",
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(&deck).unwrap(), expected);
+    }
+
+    #[test]
+    fn preview_notes_writer_writes_the_include_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let included = dir.path().join("shared.md");
+        let top_source = concat!(
+            "---\n",
+            "time: 1m\n",
+            "---\n",
+            "<!-- {\"include\":\"shared.md\"} -->\n",
+            "---\n",
+            "# Top\n",
+        );
+        fs::write(&deck, top_source).unwrap();
+        fs::write(
+            &included,
+            concat!(
+                "<!-- {\"key\":\"shared\"} -->\n",
+                "# Shared\n\n",
+                "<!-- original note -->",
+            ),
+        )
+        .unwrap();
+        let mut writer = preview_notes_writer(deck.clone());
+
+        writer(
+            &peitho_core::domain::SlideKey::new("shared").unwrap(),
+            "edited in preview",
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(&deck).unwrap(), top_source);
+        assert_eq!(
+            fs::read_to_string(&included).unwrap(),
+            concat!(
+                "<!-- {\"key\":\"shared\"} -->\n",
+                "# Shared\n\n",
+                "<!-- edited in preview -->\n\n",
+            )
+        );
+
+        writer(&peitho_core::domain::SlideKey::new("shared").unwrap(), "x").unwrap();
+        assert_eq!(fs::read_to_string(&deck).unwrap(), top_source);
+        assert_eq!(
+            fs::read_to_string(&included).unwrap(),
+            concat!(
+                "<!-- {\"key\":\"shared\"} -->\n",
+                "# Shared\n\n",
+                "<!-- x -->\n\n",
+            )
+        );
+    }
+
+    #[test]
+    fn preview_notes_writer_preserves_a_leading_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(
+            &deck,
+            b"\xef\xbb\xbf<!-- {\"key\":\"bom\"} -->\n# BOM\n\n<!-- old note -->\n",
+        )
+        .unwrap();
+        let mut writer = preview_notes_writer(deck.clone());
+
+        writer(
+            &peitho_core::domain::SlideKey::new("bom").unwrap(),
+            "new note",
+        )
+        .unwrap();
+
+        let bytes = fs::read(&deck).unwrap();
+        assert!(bytes.starts_with(b"\xef\xbb\xbf"));
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "\u{feff}<!-- {\"key\":\"bom\"} -->\n# BOM\n\n<!-- new note -->\n"
+        );
+    }
+
+    #[test]
+    fn preview_notes_writer_does_not_run_code_image_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let sentinel = dir.path().join("code-image-command-ran");
+        fs::write(
+            &deck,
+            format!(
+                "---\ncode_images:\n  dot: sh -c 'touch {}'\n---\n<!-- {{\"key\":\"diagram\"}} -->\n# Diagram\n\n```dot\ndigraph {{}}\n```\n\n<!-- old note -->\n",
+                sentinel.display()
+            ),
+        )
+        .unwrap();
+        let mut writer = preview_notes_writer(deck.clone());
+
+        writer(
+            &peitho_core::domain::SlideKey::new("diagram").unwrap(),
+            "safe note",
+        )
+        .unwrap();
+
+        assert!(fs::read_to_string(&deck)
+            .unwrap()
+            .contains("<!-- safe note -->"));
+        assert!(!sentinel.exists());
+    }
+
+    #[test]
+    fn preview_notes_writer_uses_build_highlighter_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let syntaxes = dir.path().join("syntaxes");
+        fs::create_dir_all(&syntaxes).unwrap();
+        fs::write(
+            syntaxes.join("carina.sublime-syntax"),
+            CARINA_SUBLIME_SYNTAX,
+        )
+        .unwrap();
+        fs::write(
+            &deck,
+            concat!(
+                "<!-- {\"key\":\"infra\"} -->\n",
+                "# Infra\n\n",
+                "```carina\n",
+                "resource \"aws_s3_bucket\" \"site\" {}\n",
+                "```\n\n",
+                "<!-- old note -->\n",
+            ),
+        )
+        .unwrap();
+        let mut writer = preview_notes_writer(deck.clone());
+
+        writer(
+            &peitho_core::domain::SlideKey::new("infra").unwrap(),
+            "syntax-aware note",
+        )
+        .unwrap();
+
+        assert!(fs::read_to_string(&deck)
+            .unwrap()
+            .contains("<!-- syntax-aware note -->"));
+    }
+
+    #[test]
+    fn preview_notes_writer_atomic_event_batch_rebuilds_once() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let mut state = watch_state_for_fixture(&fixture);
+        let mut watcher = RecordingWatchController::default();
+        let tmp_path = fixture.options.input.with_file_name("deck.md.tmp");
+        let rebuilds = Cell::new(0);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        handle_watch_paths_with_rebuild(
+            &mut state,
+            &mut watcher,
+            std::slice::from_ref(&tmp_path),
+            &mut stdout,
+            &mut stderr,
+            |_, _| {
+                rebuilds.set(rebuilds.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rebuilds.get(), 0);
+
+        handle_watch_paths_with_rebuild(
+            &mut state,
+            &mut watcher,
+            &[tmp_path, fixture.options.input.clone()],
+            &mut stdout,
+            &mut stderr,
+            |_, _| {
+                rebuilds.set(rebuilds.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rebuilds.get(), 1);
+    }
+
+    #[test]
+    fn preview_notes_writer_classifies_conflict_unprocessable_and_io() {
+        let broken_dir = tempfile::tempdir().unwrap();
+        let broken_deck = broken_dir.path().join("deck.md");
+        fs::write(&broken_deck, "---\ntime: [\n---\n# Broken\n").unwrap();
+        let mut broken_writer = preview_notes_writer(broken_deck);
+        assert!(matches!(
+            broken_writer(
+                &peitho_core::domain::SlideKey::new("broken").unwrap(),
+                "note"
+            ),
+            Err(server::NotesWriteError::Conflict(_))
+        ));
+
+        let vanished_dir = tempfile::tempdir().unwrap();
+        let vanished_deck = vanished_dir.path().join("deck.md");
+        fs::write(
+            &vanished_deck,
+            "<!-- {\"key\":\"vanished\"} -->\n# Before\n",
+        )
+        .unwrap();
+        let mut vanished_writer = preview_notes_writer(vanished_deck.clone());
+        fs::write(
+            &vanished_deck,
+            "<!-- {\"key\":\"replacement\"} -->\n# After\n",
+        )
+        .unwrap();
+        let missing = vanished_writer(
+            &peitho_core::domain::SlideKey::new("vanished").unwrap(),
+            "note",
+        )
+        .unwrap_err();
+        let server::NotesWriteError::Conflict(message) = missing else {
+            panic!("missing slide key must be a conflict: {missing:?}");
+        };
+        assert!(message.contains("slide key 'vanished' not found in current deck"));
+        assert!(message.contains("reload preview and retry on a slide whose key still exists"));
+
+        let invalid_dir = tempfile::tempdir().unwrap();
+        let invalid_deck = invalid_dir.path().join("deck.md");
+        fs::write(
+            &invalid_deck,
+            "<!-- {\"key\":\"invalid\"} -->\n# Invalid\n\n<!-- old note -->\n",
+        )
+        .unwrap();
+        let mut invalid_writer = preview_notes_writer(invalid_deck);
+        assert!(matches!(
+            invalid_writer(
+                &peitho_core::domain::SlideKey::new("invalid").unwrap(),
+                "cannot --> save"
+            ),
+            Err(server::NotesWriteError::Unprocessable(_))
+        ));
+        assert!(matches!(
+            invalid_writer(
+                &peitho_core::domain::SlideKey::new("invalid").unwrap(),
+                "{looks like settings}"
+            ),
+            Err(server::NotesWriteError::Unprocessable(_))
+        ));
+
+        let deleted_dir = tempfile::tempdir().unwrap();
+        let deleted_deck = deleted_dir.path().join("deck.md");
+        fs::write(&deleted_deck, "# Deleted\n").unwrap();
+        let mut deleted_writer = preview_notes_writer(deleted_deck.clone());
+        fs::remove_file(&deleted_deck).unwrap();
+        assert!(matches!(
+            deleted_writer(
+                &peitho_core::domain::SlideKey::new("deleted").unwrap(),
+                "note"
+            ),
+            Err(server::NotesWriteError::Io(_))
+        ));
+
+        let unwritable_dir = tempfile::tempdir().unwrap();
+        let unwritable_deck = unwritable_dir.path().join("deck.md");
+        fs::write(
+            &unwritable_deck,
+            "<!-- {\"key\":\"unwritable\"} -->\n# Unwritable\n\n<!-- old note -->\n",
+        )
+        .unwrap();
+        fs::create_dir(unwritable_dir.path().join("deck.md.tmp")).unwrap();
+        let mut unwritable_writer = preview_notes_writer(unwritable_deck);
+        let write_error = unwritable_writer(
+            &peitho_core::domain::SlideKey::new("unwritable").unwrap(),
+            "new note",
+        )
+        .unwrap_err();
+        let server::NotesWriteError::Io(message) = write_error else {
+            panic!("origin write failure must be I/O: {write_error:?}");
+        };
+        assert!(message.contains("make the file and its directory writable and retry"));
+    }
+
+    #[test]
+    fn preview_notes_writer_preserves_crlf_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(
+            &deck,
+            b"<!-- {\"key\":\"crlf\"} -->\r\n# CRLF\r\n\r\n<!-- old note -->\r\n",
+        )
+        .unwrap();
+        let mut writer = preview_notes_writer(deck.clone());
+
+        writer(
+            &peitho_core::domain::SlideKey::new("crlf").unwrap(),
+            "line one\nline two",
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(&deck).unwrap(),
+            b"<!-- {\"key\":\"crlf\"} -->\r\n# CRLF\r\n\r\n<!--\r\nline one\r\nline two\r\n-->\r\n"
+        );
+
+        let mixed_deck = dir.path().join("mixed.md");
+        let mixed_source = "<!-- {\"key\":\"a\"} -->\r\n# A\n\n<!-- old -->\n---\n# B\n";
+        fs::write(&mixed_deck, mixed_source).unwrap();
+        let mut mixed_writer = preview_notes_writer(mixed_deck.clone());
+
+        mixed_writer(&peitho_core::domain::SlideKey::new("a").unwrap(), "new").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&mixed_deck).unwrap(),
+            mixed_source.replace("<!-- old -->", "<!-- new -->")
+        );
+
+        let unterminated_deck = dir.path().join("unterminated.md");
+        fs::write(
+            &unterminated_deck,
+            b"<!-- {\"key\":\"a\"} -->\r\n# A\r\n---\r\n# B",
+        )
+        .unwrap();
+        let mut unterminated_writer = preview_notes_writer(unterminated_deck.clone());
+
+        unterminated_writer(&peitho_core::domain::SlideKey::new("b").unwrap(), "m1\nm2").unwrap();
+
+        let bytes = fs::read(&unterminated_deck).unwrap();
+        assert_eq!(
+            bytes,
+            b"<!-- {\"key\":\"a\"} -->\r\n# A\r\n---\r\n# B\r\n\r\n<!--\r\nm1\r\nm2\r\n-->\r\n"
+        );
+        assert!(bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| { *byte != b'\n' || (index > 0 && bytes[index - 1] == b'\r') }));
     }
 
     #[test]
