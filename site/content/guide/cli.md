@@ -62,7 +62,10 @@ when the panel loses focus (click away), when you move to another slide, and
 when the page is reloaded or closed. While the textarea has focus, arrows,
 Home, End, and every other key edit text; only PageUp and PageDown still
 change slides (the note is saved first), and Esc leaves the textarea so that
-a second Esc enters the overview. A slide change (or entering the overview)
+a second Esc enters the overview. The other direction is symmetric: Enter in
+the overview opens the selected slide, and Enter in the single-slide view
+focuses the textarea with the caret at the end, so the whole loop works
+without a mouse. A slide change (or entering the overview)
 waits for the save and is cancelled if it fails, so unsaved text is never left
 behind; the reason appears in red next to the position line and the text
 stays in the panel until a later save succeeds. A rebuild triggered by the
