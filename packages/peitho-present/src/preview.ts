@@ -181,8 +181,11 @@ class PreviewShellController implements PreviewShell {
   private readonly slides: PreviewSlideView[] = [];
   private notes: Notes = { version: 1, notes: {} };
   private readonly notesPanel: HTMLElement;
-  private readonly notesPosition: HTMLElement;
-  private readonly notesBody: HTMLElement;
+  private readonly notesTextarea: HTMLTextAreaElement;
+  private readonly notesStatus: HTMLSpanElement;
+  private readonly notesPositionText: HTMLSpanElement;
+  private notesTextareaKey: string | null = null;
+  private flushChain: Promise<boolean> = Promise.resolve(true);
   private readonly strip: HTMLElement;
   private readonly tileClickGuardCleanups: Array<() => void> = [];
   private fontScopeCleanup: (() => void) | null = null;
@@ -208,6 +211,9 @@ class PreviewShellController implements PreviewShell {
     else this.log.error("Invalid peitho:overviewrequest event");
   };
   private readonly onResize = (): void => this.applyLayout();
+  private readonly onNotesBlur = (): void => {
+    void this.flushNotes();
+  };
 
   constructor(options: PreviewShellOptions) {
     this.root = options.root;
@@ -228,9 +234,17 @@ class PreviewShellController implements PreviewShell {
     }
     this.root.style.background = "#000";
     this.notesPanel = this.createNotesPanel();
-    this.notesPosition = this.notesPanel.querySelector('[data-peitho-preview="position"]')!;
-    this.notesBody = this.notesPanel.querySelector('[data-peitho-preview="note"]')!;
+    this.notesTextarea = this.notesPanel.querySelector<HTMLTextAreaElement>(
+      '[data-peitho-preview="note"]'
+    )!;
+    this.notesStatus = this.notesPanel.querySelector<HTMLSpanElement>(
+      '[data-peitho-preview="status"]'
+    )!;
+    this.notesPositionText = this.notesPanel.querySelector<HTMLSpanElement>(
+      '[data-peitho-preview="position"]'
+    )!;
     this.strip = this.createStrip();
+    this.notesTextarea.addEventListener("blur", this.onNotesBlur);
     this.bus.addEventListener("peitho:navigate", this.onNavigate);
     this.bus.addEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.win.addEventListener("resize", this.onResize);
@@ -289,6 +303,54 @@ class PreviewShellController implements PreviewShell {
     this.navigateToTarget(to);
   }
 
+  private flushNotes(keepalive = false): Promise<boolean> {
+    const key = this.notesTextareaKey;
+    const text = this.notesTextarea.value;
+    // The two-arm then keeps the chain alive if doFlush ever rejects.
+    this.flushChain = this.flushChain.then(
+      () => this.doFlush(key, text, keepalive),
+      () => this.doFlush(key, text, keepalive)
+    );
+    return this.flushChain;
+  }
+
+  private async doFlush(key: string | null, text: string, keepalive: boolean): Promise<boolean> {
+    if (key === null) return true;
+    const dirty = text !== (this.notes.notes[key] ?? "");
+    if (!dirty) {
+      this.notesStatus.textContent = "";
+      return true;
+    }
+
+    try {
+      const response = await this.fetcher("/notes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key, text }),
+        keepalive
+      });
+      if (response.ok) {
+        if (text === "") delete this.notes.notes[key];
+        else this.notes.notes[key] = text;
+        this.notesStatus.textContent = "";
+        return true;
+      }
+
+      const body = await response.text();
+      let message = body;
+      try {
+        const error = (JSON.parse(body) as { error?: unknown }).error;
+        if (typeof error === "string") message = error;
+      } catch {
+        // A non-JSON response is already the server's displayable error text.
+      }
+      this.notesStatus.textContent = message;
+    } catch (error) {
+      this.notesStatus.textContent = error instanceof Error ? error.message : String(error);
+    }
+    return false;
+  }
+
   private navigateToTarget(to: PreviewNavigateTarget): boolean {
     const index = this.resolveTarget(to);
     if (index === null) return false;
@@ -306,6 +368,7 @@ class PreviewShellController implements PreviewShell {
   }
 
   destroy(): void {
+    this.notesTextarea.removeEventListener("blur", this.onNotesBlur);
     this.bus.removeEventListener("peitho:navigate", this.onNavigate);
     this.bus.removeEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.win.removeEventListener("resize", this.onResize);
@@ -454,27 +517,50 @@ class PreviewShellController implements PreviewShell {
     style.background = "#15181e";
     style.color = "#e5e7eb";
     style.font = "18px/1.5 system-ui, sans-serif";
-    const position = this.doc.createElement("div");
-    position.dataset.peithoPreview = "position";
-    position.style.font = "600 13px/1.5 system-ui, sans-serif";
-    position.style.color = "#9ca3af";
-    position.style.fontVariantNumeric = "tabular-nums";
-    position.style.marginBottom = "4px";
-    panel.appendChild(position);
-    const body = this.doc.createElement("div");
-    body.dataset.peithoPreview = "note";
-    body.style.whiteSpace = "pre-wrap";
-    panel.appendChild(body);
+    style.flexDirection = "column";
+    const positionRow = this.doc.createElement("div");
+    positionRow.style.display = "flex";
+    positionRow.style.font = "600 13px/1.5 system-ui, sans-serif";
+    positionRow.style.color = "#9ca3af";
+    positionRow.style.fontVariantNumeric = "tabular-nums";
+    positionRow.style.marginBottom = "4px";
+    const positionText = this.doc.createElement("span");
+    positionText.dataset.peithoPreview = "position";
+    positionText.style.flexShrink = "0";
+    positionRow.appendChild(positionText);
+    const status = this.doc.createElement("span");
+    status.dataset.peithoPreview = "status";
+    status.style.marginLeft = "auto";
+    status.style.color = "#f87171";
+    status.style.whiteSpace = "pre-wrap";
+    status.style.overflowWrap = "anywhere";
+    positionRow.appendChild(status);
+    panel.appendChild(positionRow);
+    const textarea = this.doc.createElement("textarea");
+    textarea.dataset.peithoPreview = "note";
+    textarea.setAttribute("aria-label", "Speaker notes");
+    textarea.placeholder = NO_NOTES_PLACEHOLDER;
+    textarea.style.background = "transparent";
+    textarea.style.color = "inherit";
+    textarea.style.font = "inherit";
+    textarea.style.border = "none";
+    textarea.style.resize = "none";
+    textarea.style.flex = "1";
+    textarea.style.minHeight = "0";
+    textarea.style.width = "100%";
+    textarea.style.padding = "0";
+    panel.appendChild(textarea);
     return panel;
   }
 
   private renderNotes(): void {
     const slide = this.slides[this.currentIndex];
-    const note = slide === undefined ? undefined : this.notes.notes[slide.meta.key];
-    this.notesPosition.textContent = `${this.currentIndex + 1} / ${this.slides.length}`;
-    this.notesBody.textContent = note ?? NO_NOTES_PLACEHOLDER;
-    this.notesPanel.classList.toggle("is-empty", note == null);
-    this.notesBody.style.opacity = note == null ? "0.5" : "1";
+    const key = slide?.meta.key ?? null;
+    this.notesPositionText.textContent = `${this.currentIndex + 1} / ${this.slides.length}`;
+    if (this.notesTextareaKey !== key) {
+      this.notesTextareaKey = key;
+      this.notesTextarea.value = key === null ? "" : (this.notes.notes[key] ?? "");
+    }
   }
 
   private setCanvasRootProperties(dimensions: CanvasDimensions, cssAspect: string): void {
@@ -609,6 +695,7 @@ class PreviewShellController implements PreviewShell {
     const thumbScale = thumbWidth / this.dimensions.width;
     const thumbHeight = this.dimensions.height * thumbScale;
     this.notesPanel.hidden = false;
+    this.notesPanel.style.display = "flex";
     this.strip.hidden = false;
     // An inline display would override the hidden attribute, so it is set only while shown.
     this.strip.style.display = "flex";
@@ -675,6 +762,7 @@ class PreviewShellController implements PreviewShell {
     this.root.style.setProperty("scroll-padding-bottom", `${GRID_PADDING}px`);
     this.root.style.boxSizing = "border-box";
     this.notesPanel.hidden = true;
+    this.notesPanel.style.display = "";
     this.strip.hidden = true;
     this.strip.style.display = "";
 
