@@ -4,6 +4,7 @@ import {
   installPreviewReload,
   mountPreviewShell,
   PREVIEW_NOTES_HEIGHT,
+  PREVIEW_STRIP_WIDTH,
   previewGridColumnCount,
   type PreviewShell
 } from "../src/preview";
@@ -688,36 +689,6 @@ it("grid vertical navigation moves by one computed row and stops at row edges", 
   expect(shell.selectedIndex).toBe(6);
 });
 
-it("single mode ignores preview vertical navigation requests", async () => {
-  const bus = new EventTarget();
-  const root = document.createElement("main");
-  setRootWidth(root, 1044);
-  const shell = await mountPreviewShell({
-    root,
-    bus,
-    fetcher: fetchForManifest(manifestWithSlideCount(7)),
-    window,
-    storage: sessionStorage,
-    viewport: () => ({ width: 1044, height: 720 })
-  });
-  shells.push(shell);
-
-  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
-  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 3 } } }));
-  const saved = sessionStorage.getItem("peitho:preview-state");
-  const up = new CustomEvent("peitho:navigate", { cancelable: true, detail: { to: "up" } });
-  const down = new CustomEvent("peitho:navigate", { cancelable: true, detail: { to: "down" } });
-  bus.dispatchEvent(up);
-  bus.dispatchEvent(down);
-
-  expect(shell.mode).toBe("single");
-  expect(shell.currentIndex).toBe(3);
-  expect(shell.selectedIndex).toBe(3);
-  expect(sessionStorage.getItem("peitho:preview-state")).toBe(saved);
-  expect(up.defaultPrevented).toBe(false);
-  expect(down.defaultPrevented).toBe(false);
-});
-
 it("clicking a grid tile shows that slide in single mode", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
@@ -1025,4 +996,99 @@ it("hides the speaker notes panel in grid mode", async () => {
   expect(panel.hidden).toBe(false);
   bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "enter" } }));
   expect(panel.hidden).toBe(true);
+});
+
+it("shows a filmstrip of every slide beside the stage in single mode", async () => {
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: standardFetch(),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const strip = root.querySelector<HTMLElement>('[data-peitho-preview="strip"]')!;
+  expect(strip.hidden).toBe(false);
+  const thumbs = Array.from(strip.querySelectorAll<HTMLElement>(".peitho-preview-thumb"));
+  expect(thumbs.map((thumb) => thumb.dataset.slideKey)).toEqual(manifest.slides.map((s) => s.key));
+  expect(thumbs.map((thumb) => thumb.getAttribute("aria-current"))).toEqual([
+    "true",
+    "false",
+    "false"
+  ]);
+  // Every thumbnail renders the slide in its own shadow root, scaled to the strip.
+  const thumbHost = thumbs[1].querySelector<HTMLElement>(".peitho-preview-thumb-slide")!;
+  expect(thumbHost.shadowRoot?.querySelector("h1")?.textContent).toBe("slides/001-middle.html");
+  expect(thumbHost.style.pointerEvents).toBe("none");
+
+  // The stage and notes sit to the right of the strip.
+  const tile = root.querySelector<HTMLElement>('.peitho-preview-tile[data-slide-key="intro"]')!;
+  expect(tile.style.left).toBe(`${PREVIEW_STRIP_WIDTH}px`);
+  const panel = root.querySelector<HTMLElement>('[data-peitho-preview="notes"]')!;
+  expect(panel.style.left).toBe(`${PREVIEW_STRIP_WIDTH}px`);
+
+  const changes: number[] = [];
+  bus.addEventListener("peitho:slidechange", (event) => {
+    changes.push((event as CustomEvent<{ index: number }>).detail.index);
+  });
+  thumbs[2].click();
+  expect(shell.mode).toBe("single");
+  expect(shell.currentIndex).toBe(2);
+  expect(changes).toEqual([2]);
+  expect(thumbs.map((thumb) => thumb.classList.contains("is-selected"))).toEqual([
+    false,
+    false,
+    true
+  ]);
+});
+
+it("hides the filmstrip in grid mode", async () => {
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: standardFetch(),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const strip = root.querySelector<HTMLElement>('[data-peitho-preview="strip"]')!;
+  expect(shell.mode).toBe("grid");
+  expect(strip.hidden).toBe(true);
+  expect(strip.style.display).toBe("");
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
+  expect(strip.hidden).toBe(false);
+  expect(strip.style.display).toBe("flex");
+});
+
+it("walks the filmstrip with ArrowUp/ArrowDown in single mode, skipping skipped slides", async () => {
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const deck = manifestWithSlides([{ key: "a" }, { key: "b", skip: true }, { key: "c" }]);
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fetchForManifest(deck),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const down = new CustomEvent("peitho:navigate", { cancelable: true, detail: { to: "down" } });
+  bus.dispatchEvent(down);
+  expect(down.defaultPrevented).toBe(true);
+  expect(shell.currentIndex).toBe(2);
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "up" } }));
+  expect(shell.currentIndex).toBe(0);
+  const atStart = new CustomEvent("peitho:navigate", { cancelable: true, detail: { to: "up" } });
+  bus.dispatchEvent(atStart);
+  expect(atStart.defaultPrevented).toBe(false);
+  expect(shell.currentIndex).toBe(0);
 });

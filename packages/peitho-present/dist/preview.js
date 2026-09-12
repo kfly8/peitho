@@ -540,6 +540,9 @@ var GRID_TILE_WIDTH = 320;
 var GRID_GAP = 18;
 var GRID_PADDING = 24;
 var PREVIEW_NOTES_HEIGHT = 160;
+var PREVIEW_STRIP_WIDTH = 200;
+var STRIP_PADDING = 12;
+var STRIP_GAP = 10;
 var NO_NOTES_PLACEHOLDER = "No notes for this slide.";
 function previewGridColumnCount(rootWidth) {
   const columns = Math.floor(
@@ -635,6 +638,7 @@ var PreviewShellController = class {
   slides = [];
   notes = { version: 1, notes: {} };
   notesPanel;
+  strip;
   tileClickGuardCleanups = [];
   fontScopeCleanup = null;
   dimensions = { width: 1280, height: 720 };
@@ -678,6 +682,7 @@ var PreviewShellController = class {
     }
     this.root.style.background = "#000";
     this.notesPanel = this.createNotesPanel();
+    this.strip = this.createStrip();
     this.bus.addEventListener("peitho:navigate", this.onNavigate);
     this.bus.addEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.win.addEventListener("resize", this.onResize);
@@ -705,11 +710,14 @@ var PreviewShellController = class {
       this.manifest = manifest;
       this.doc.title = manifest.title;
       this.root.replaceChildren();
+      this.strip.replaceChildren();
       for (const view of pending) {
         this.root.appendChild(view.tile);
+        this.strip.appendChild(view.thumb);
         this.slides.push(view);
       }
       this.root.appendChild(this.notesPanel);
+      this.root.appendChild(this.strip);
       const restored = this.restoredState;
       const restoredIndex = restored === null ? this.clampIndex(initialSlideIndex(pending.map((view) => view.meta)) ?? 0) : this.clampIndex(restored.index);
       this.currentIndex = restoredIndex;
@@ -783,8 +791,23 @@ var PreviewShellController = class {
       this.setIndex(slide.index);
       this.exitGrid();
     });
+    const host = this.createSlideHost(slide, html, css, "peitho-preview-slide");
+    tile.appendChild(host);
+    const thumb = this.doc.createElement("div");
+    thumb.classList.add("peitho-preview-thumb");
+    thumb.dataset.slideKey = slide.key;
+    thumb.dataset.slideIndex = String(slide.index);
+    thumb.setAttribute("role", "button");
+    thumb.setAttribute("aria-label", `Slide ${slide.index + 1}`);
+    thumb.addEventListener("click", () => this.setIndex(slide.index));
+    const thumbHost = this.createSlideHost(slide, html, css, "peitho-preview-thumb-slide");
+    thumbHost.style.pointerEvents = "none";
+    thumb.appendChild(thumbHost);
+    return { meta: slide, tile, host, thumb, thumbHost };
+  }
+  createSlideHost(slide, html, css, className) {
     const host = this.doc.createElement("section");
-    host.classList.add("peitho-preview-slide");
+    host.classList.add(className);
     host.dataset.slideKey = slide.key;
     host.dataset.slideIndex = String(slide.index);
     host.dataset.peithoCanvas = "slide";
@@ -795,8 +818,29 @@ var PreviewShellController = class {
     const template = this.doc.createElement("template");
     template.innerHTML = html;
     shadow.appendChild(template.content.cloneNode(true));
-    tile.appendChild(host);
-    return { meta: slide, tile, host };
+    return host;
+  }
+  createStrip() {
+    const strip = this.doc.createElement("nav");
+    strip.classList.add("peitho-preview-strip");
+    strip.dataset.peithoPreview = "strip";
+    strip.setAttribute("aria-label", "Slides");
+    strip.hidden = true;
+    const style = strip.style;
+    style.position = "absolute";
+    style.left = "0";
+    style.top = "0";
+    style.bottom = "0";
+    style.width = `${PREVIEW_STRIP_WIDTH}px`;
+    style.boxSizing = "border-box";
+    style.overflowY = "auto";
+    style.padding = `${STRIP_PADDING}px`;
+    style.scrollPadding = `${STRIP_PADDING}px`;
+    style.flexDirection = "column";
+    style.gap = `${STRIP_GAP}px`;
+    style.borderRight = "1px solid rgba(255,255,255,0.16)";
+    style.background = "#15181e";
+    return strip;
   }
   createNotesPanel() {
     const panel = this.doc.createElement("aside");
@@ -806,7 +850,7 @@ var PreviewShellController = class {
     panel.hidden = true;
     const style = panel.style;
     style.position = "absolute";
-    style.left = "0";
+    style.left = `${PREVIEW_STRIP_WIDTH}px`;
     style.right = "0";
     style.bottom = "0";
     style.height = `${PREVIEW_NOTES_HEIGHT}px`;
@@ -883,7 +927,10 @@ var PreviewShellController = class {
       if (this.mode === "grid") return Math.max(this.selectedIndex - 1, 0);
       return this.resolveSequentialTarget(-1);
     }
-    if (to === "up" || to === "down") return this.resolveGridVerticalTarget(to);
+    if (to === "up" || to === "down") {
+      if (this.mode === "grid") return this.resolveGridVerticalTarget(to);
+      return this.resolveSequentialTarget(to === "up" ? -1 : 1);
+    }
     if ("index" in to) {
       if (to.index < 0 || to.index >= this.slides.length) {
         this.log.error(`Unknown slide index: ${to.index}`);
@@ -906,7 +953,6 @@ var PreviewShellController = class {
     );
   }
   resolveGridVerticalTarget(direction) {
-    if (this.mode !== "grid") return null;
     const columns = previewGridColumnCount(this.gridRootWidth());
     const selected = this.clampIndex(this.selectedIndex);
     const next = selected + (direction === "up" ? -columns : columns);
@@ -932,11 +978,19 @@ var PreviewShellController = class {
       height: this.win.innerHeight
     };
     const fit = calculateCanvasFit(
-      { width: viewport.width, height: Math.max(0, viewport.height - PREVIEW_NOTES_HEIGHT) },
+      {
+        width: Math.max(0, viewport.width - PREVIEW_STRIP_WIDTH),
+        height: Math.max(0, viewport.height - PREVIEW_NOTES_HEIGHT)
+      },
       this.dimensions.width,
       this.dimensions.height
     );
+    const thumbWidth = PREVIEW_STRIP_WIDTH - STRIP_PADDING * 2 - 2;
+    const thumbScale = thumbWidth / this.dimensions.width;
+    const thumbHeight = this.dimensions.height * thumbScale;
     this.notesPanel.hidden = false;
+    this.strip.hidden = false;
+    this.strip.style.display = "flex";
     this.renderNotes();
     this.root.style.display = "block";
     this.root.style.overflow = "hidden";
@@ -950,9 +1004,9 @@ var PreviewShellController = class {
       slide.tile.hidden = !active;
       slide.tile.classList.toggle("is-selected", active);
       slide.tile.style.position = "absolute";
-      slide.tile.style.left = "0";
+      slide.tile.style.left = `${PREVIEW_STRIP_WIDTH}px`;
       slide.tile.style.top = "0";
-      slide.tile.style.width = "100%";
+      slide.tile.style.width = `calc(100% - ${PREVIEW_STRIP_WIDTH}px)`;
       slide.tile.style.height = "100%";
       slide.tile.style.overflow = "hidden";
       slide.tile.style.border = "0";
@@ -964,7 +1018,22 @@ var PreviewShellController = class {
       slide.tile.style.background = "transparent";
       slide.host.hidden = !active;
       this.applyHostFrame(slide.host, fit.left, fit.top, fit.scale);
+      slide.thumb.classList.toggle("is-selected", active);
+      slide.thumb.setAttribute("aria-current", active ? "true" : "false");
+      slide.thumb.style.position = "relative";
+      slide.thumb.style.flexShrink = "0";
+      slide.thumb.style.width = `${thumbWidth}px`;
+      slide.thumb.style.height = `${thumbHeight}px`;
+      slide.thumb.style.overflow = "hidden";
+      slide.thumb.style.border = "1px solid rgba(255,255,255,0.24)";
+      slide.thumb.style.borderRadius = "4px";
+      slide.thumb.style.outline = active ? "3px solid #7dd3fc" : "";
+      slide.thumb.style.outlineOffset = active ? "1px" : "";
+      slide.thumb.style.background = "#000";
+      slide.thumb.style.cursor = "pointer";
+      this.applyHostFrame(slide.thumbHost, 0, 0, thumbScale);
     });
+    this.slides[this.currentIndex]?.thumb.scrollIntoView?.({ block: "nearest" });
   }
   applyGridLayout() {
     const scale = GRID_TILE_WIDTH / this.dimensions.width;
@@ -980,6 +1049,8 @@ var PreviewShellController = class {
     this.root.style.setProperty("scroll-padding-bottom", `${GRID_PADDING}px`);
     this.root.style.boxSizing = "border-box";
     this.notesPanel.hidden = true;
+    this.strip.hidden = true;
+    this.strip.style.display = "";
     this.slides.forEach((slide, index) => {
       const selected = index === this.selectedIndex;
       slide.tile.hidden = false;
@@ -1053,6 +1124,7 @@ var PreviewShellController = class {
 };
 export {
   PREVIEW_NOTES_HEIGHT,
+  PREVIEW_STRIP_WIDTH,
   installPreviewKeyboard,
   installPreviewReload,
   mountPreviewShell,
