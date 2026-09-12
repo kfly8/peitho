@@ -118,18 +118,37 @@ const previewNavigationKeyMap = new Map<string, PreviewNavigateTarget>([
 ]);
 const verticalPreviewNavigationTargets = new Set<PreviewNavigateTarget>(["up", "down"]);
 
+function isComposingKey(event: KeyboardEvent): boolean {
+  return event.isComposing || event.keyCode === 229;
+}
+
+function isEditableTarget(event: KeyboardEvent): boolean {
+  const target = event.composedPath()[0];
+  return (
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLSelectElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  );
+}
+
 export function installPreviewKeyboard(
   win: Window = window,
   bus: EventTarget = win
 ): () => void {
   const onKeyDown = (event: KeyboardEvent): void => {
-    if (hasChordModifier(event)) return;
+    if (hasChordModifier(event) || isComposingKey(event)) return;
+    const editable = isEditableTarget(event);
+    if (editable && (event.shiftKey || (event.key !== "PageUp" && event.key !== "PageDown"))) {
+      return;
+    }
     if (event.key === "o") {
       event.preventDefault();
       dispatchOverviewRequest(bus, "toggle");
       return;
     }
     if (event.key === "Escape") {
+      if (event.repeat) return;
       event.preventDefault();
       dispatchOverviewRequest(bus, "enter");
       return;
@@ -146,7 +165,7 @@ export function installPreviewKeyboard(
       detail: { to }
     });
     bus.dispatchEvent(request);
-    if (!verticalPreviewNavigationTargets.has(to) || request.defaultPrevented) {
+    if (request.defaultPrevented || (!editable && !verticalPreviewNavigationTargets.has(to))) {
       event.preventDefault();
     }
   };
@@ -238,6 +257,12 @@ class PreviewShellController implements PreviewShell {
     else this.log.error("Invalid peitho:overviewrequest event");
   };
   private readonly onResize = (): void => this.applyLayout();
+  private readonly onNotesKeyDown = (event: KeyboardEvent): void => {
+    if (isComposingKey(event)) return;
+    if (hasChordModifier(event) || event.key !== "Escape") return;
+    event.preventDefault();
+    this.notesTextarea.blur();
+  };
   private readonly onNotesBlur = (): void => {
     void this.flushNotes();
   };
@@ -277,6 +302,7 @@ class PreviewShellController implements PreviewShell {
       '[data-peitho-preview="position"]'
     )!;
     this.strip = this.createStrip();
+    this.notesTextarea.addEventListener("keydown", this.onNotesKeyDown);
     this.notesTextarea.addEventListener("blur", this.onNotesBlur);
     this.bus.addEventListener("peitho:navigate", this.onNavigate);
     this.bus.addEventListener("peitho:overviewrequest", this.onOverviewRequest);
@@ -420,6 +446,7 @@ class PreviewShellController implements PreviewShell {
 
   destroy(): void {
     this.transitionSequence += 1;
+    this.notesTextarea.removeEventListener("keydown", this.onNotesKeyDown);
     this.notesTextarea.removeEventListener("blur", this.onNotesBlur);
     this.bus.removeEventListener("peitho:navigate", this.onNavigate);
     this.bus.removeEventListener("peitho:overviewrequest", this.onOverviewRequest);

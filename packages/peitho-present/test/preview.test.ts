@@ -244,6 +244,222 @@ it("preview keyboard emits overview requests from o and ignores chord modifiers"
   expect(requests).toEqual([{ action: "toggle" }]);
 });
 
+it("preview_keyboard_only_dispatches_page_keys_from_editable_targets", () => {
+  const bus = new EventTarget();
+  const navigations: unknown[] = [];
+  const overviewRequests: unknown[] = [];
+  bus.addEventListener("peitho:navigate", (event) =>
+    navigations.push((event as CustomEvent).detail)
+  );
+  bus.addEventListener("peitho:overviewrequest", (event) =>
+    overviewRequests.push((event as CustomEvent).detail)
+  );
+  cleanups.push(installPreviewKeyboard(window, bus));
+
+  const textarea = document.createElement("textarea");
+  const input = document.createElement("input");
+  const select = document.createElement("select");
+  const contenteditableRoot = document.createElement("div");
+  contenteditableRoot.setAttribute("contenteditable", "true");
+  const contenteditableChild = document.createElement("span");
+  contenteditableRoot.appendChild(contenteditableChild);
+  if (!("isContentEditable" in contenteditableChild)) {
+    Object.defineProperty(contenteditableChild, "isContentEditable", { value: true });
+  }
+  const shadowHost = document.createElement("div");
+  const shadowTextarea = document.createElement("textarea");
+  shadowHost.attachShadow({ mode: "open" }).appendChild(shadowTextarea);
+  document.body.append(textarea, input, select, contenteditableRoot, shadowHost);
+  cleanups.push(() => {
+    textarea.remove();
+    input.remove();
+    select.remove();
+    contenteditableRoot.remove();
+    shadowHost.remove();
+  });
+
+  const pageDown = new KeyboardEvent("keydown", {
+    key: "PageDown",
+    bubbles: true,
+    cancelable: true
+  });
+  textarea.dispatchEvent(pageDown);
+  expect(navigations).toEqual([{ to: "next" }]);
+  expect(pageDown.defaultPrevented).toBe(false);
+
+  for (const key of [
+    "ArrowLeft",
+    "ArrowRight",
+    "ArrowUp",
+    "ArrowDown",
+    "Home",
+    "End",
+    "o",
+    "Enter",
+    "Escape"
+  ]) {
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    textarea.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+  }
+  expect(navigations).toEqual([{ to: "next" }]);
+  expect(overviewRequests).toEqual([]);
+
+  const pageUp = new KeyboardEvent("keydown", {
+    key: "PageUp",
+    bubbles: true,
+    cancelable: true
+  });
+  textarea.dispatchEvent(pageUp);
+  expect(navigations).toEqual([{ to: "next" }, { to: "prev" }]);
+  expect(pageUp.defaultPrevented).toBe(false);
+
+  for (const editable of [input, select, contenteditableChild]) {
+    const editablePageDown = new KeyboardEvent("keydown", {
+      key: "PageDown",
+      bubbles: true,
+      cancelable: true
+    });
+    const editableArrowRight = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true
+    });
+    editable.dispatchEvent(editablePageDown);
+    editable.dispatchEvent(editableArrowRight);
+    expect(editablePageDown.defaultPrevented).toBe(false);
+    expect(editableArrowRight.defaultPrevented).toBe(false);
+  }
+  expect(navigations).toEqual([
+    { to: "next" },
+    { to: "prev" },
+    { to: "next" },
+    { to: "next" },
+    { to: "next" }
+  ]);
+
+  for (const key of ["Escape", "ArrowRight"]) {
+    const event = new KeyboardEvent("keydown", {
+      key,
+      bubbles: true,
+      composed: true,
+      cancelable: true
+    });
+    shadowTextarea.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+  }
+  expect(navigations).toHaveLength(5);
+  expect(overviewRequests).toEqual([]);
+  const shadowPageDown = new KeyboardEvent("keydown", {
+    key: "PageDown",
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  shadowTextarea.dispatchEvent(shadowPageDown);
+  expect(shadowPageDown.defaultPrevented).toBe(false);
+  expect(navigations).toHaveLength(6);
+  expect(navigations.at(-1)).toEqual({ to: "next" });
+
+  for (const key of ["PageUp", "PageDown"]) {
+    for (const modifier of [{ metaKey: true }, { shiftKey: true }]) {
+      const event = new KeyboardEvent("keydown", {
+        key,
+        ...modifier,
+        bubbles: true,
+        cancelable: true
+      });
+      textarea.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(navigations).toHaveLength(6);
+    }
+  }
+});
+
+it("editable_page_navigation_is_prevented_only_when_accepted", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 2 }));
+  const shell = await mountForTest(root, bus);
+  cleanups.push(installPreviewKeyboard(window, bus));
+  const textarea = root.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="note"]'
+  )!;
+
+  const boundaryPageDown = new KeyboardEvent("keydown", {
+    key: "PageDown",
+    bubbles: true,
+    cancelable: true
+  });
+  textarea.dispatchEvent(boundaryPageDown);
+  expect(boundaryPageDown.defaultPrevented).toBe(false);
+  expect(shell.currentIndex).toBe(2);
+
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 1 } } }));
+  expect(shell.currentIndex).toBe(1);
+  const acceptedPageDown = new KeyboardEvent("keydown", {
+    key: "PageDown",
+    bubbles: true,
+    cancelable: true
+  });
+  textarea.dispatchEvent(acceptedPageDown);
+  expect(acceptedPageDown.defaultPrevented).toBe(true);
+  expect(shell.currentIndex).toBe(2);
+});
+
+it("composing_keys_are_ignored_in_the_notes_textarea", async () => {
+  const bus = new EventTarget();
+  const navigations: unknown[] = [];
+  bus.addEventListener("peitho:navigate", (event) =>
+    navigations.push((event as CustomEvent).detail)
+  );
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountForTest(root, bus);
+  cleanups.push(installPreviewKeyboard(window, bus));
+  const textarea = root.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="note"]'
+  )!;
+
+  textarea.focus();
+  expect(document.activeElement).toBe(textarea);
+  const composingEscape = new KeyboardEvent("keydown", {
+    key: "Escape",
+    isComposing: true,
+    bubbles: true,
+    cancelable: true
+  });
+  textarea.dispatchEvent(composingEscape);
+  expect(document.activeElement).toBe(textarea);
+  expect(composingEscape.defaultPrevented).toBe(false);
+
+  const safariCompositionEscape = new KeyboardEvent("keydown", {
+    key: "Escape",
+    isComposing: false,
+    bubbles: true,
+    cancelable: true
+  });
+  Object.defineProperty(safariCompositionEscape, "keyCode", { value: 229 });
+  textarea.dispatchEvent(safariCompositionEscape);
+  expect(document.activeElement).toBe(textarea);
+  expect(safariCompositionEscape.defaultPrevented).toBe(false);
+
+  const composingPageDown = new KeyboardEvent("keydown", {
+    key: "PageDown",
+    isComposing: true,
+    bubbles: true,
+    cancelable: true
+  });
+  textarea.dispatchEvent(composingPageDown);
+  expect(composingPageDown.defaultPrevented).toBe(false);
+  expect(navigations).toEqual([]);
+  expect(shell.currentIndex).toBe(0);
+});
+
 it("preview keyboard emits command requests and ignores chord-modified commands", () => {
   const bus = new EventTarget();
   const requests: unknown[] = [];
@@ -422,6 +638,73 @@ it("Escape returns to grid mode with the current slide selected", async () => {
   expect(shell.mode).toBe("grid");
   expect(shell.currentIndex).toBe(2);
   expect(shell.selectedIndex).toBe(2);
+});
+
+it("escape_in_the_notes_textarea_blurs_before_entering_grid", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  const fixture = previewFetchFixture();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  cleanups.push(installPreviewKeyboard(window, bus));
+  const textarea = root.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="note"]'
+  )!;
+
+  textarea.value = "edited with Escape";
+  textarea.focus();
+  expect(document.activeElement).toBe(textarea);
+  const blurEditor = new KeyboardEvent("keydown", {
+    key: "Escape",
+    bubbles: true,
+    cancelable: true
+  });
+  textarea.dispatchEvent(blurEditor);
+
+  expect(document.activeElement).not.toBe(textarea);
+  expect(shell.mode).toBe("single");
+  expect(blurEditor.defaultPrevented).toBe(true);
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  expect(JSON.parse(fixture.notesPosts()[0][1].body as string)).toEqual({
+    key: "intro",
+    text: "edited with Escape"
+  });
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(fixture.notes.notes.intro).toBe("edited with Escape"));
+
+  const repeatedEscape = new KeyboardEvent("keydown", {
+    key: "Escape",
+    repeat: true,
+    cancelable: true
+  });
+  window.dispatchEvent(repeatedEscape);
+  expect(repeatedEscape.defaultPrevented).toBe(false);
+  expect(shell.mode).toBe("single");
+
+  const repeatedArrowRight = new KeyboardEvent("keydown", {
+    key: "ArrowRight",
+    repeat: true,
+    cancelable: true
+  });
+  window.dispatchEvent(repeatedArrowRight);
+  expect(repeatedArrowRight.defaultPrevented).toBe(true);
+  expect(shell.currentIndex).toBe(1);
+  expect(shell.mode).toBe("single");
+
+  const enterGrid = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+  window.dispatchEvent(enterGrid);
+  expect(enterGrid.defaultPrevented).toBe(true);
+  expect(shell.mode).toBe("grid");
 });
 
 it("Escape in grid mode stays in grid mode", async () => {
