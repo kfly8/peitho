@@ -211,6 +211,30 @@ non-blank line byte-for-byte, and append exactly one blank line, the canonical
 comment, and one final line ending. Use the existing `parser::line_for_offset`
 for error lines.
 
+**Revision (2026-09-12, PR for this task).** Review measured that in-place
+replacement of inline, indented, or blockquote comments, and whole-line
+removal next to a non-blank line, produced files that no longer parsed back to
+the same deck (setext merge across `---`, unterminated `<!--` inside
+containers, notes leaking into slide content, comments appended inside an
+unclosed fence). The implemented rules therefore differ from the text above:
+the signature takes `highlighter: &Highlighter`; only a column-0 whole-line
+first span is replaced in place and every other span is removed with the
+comment appended at the slide end; whole-line removal between two non-blank
+lines leaves a blank line (or a bare `>`); the design postcondition is
+enforced by re-parsing inside `rewrite_note` and failing with a third
+`ErrorKind::Parse` error (`speaker note cannot be written at this position`);
+a leading BOM is stripped and restored inside the function; and spans that
+do not match the source (out of range, unsorted, overlapping, not on a char
+boundary, or not an HTML comment) are a fourth `ErrorKind::Parse` error
+instead of a panic. Because `rewrite_note` re-parses the text it is given,
+Task 6 must call it on the combined source with the `ParsedSlide`'s own
+spans and translate only `source_span` to the origin file (an origin file
+parsed alone lacks the top deck's frontmatter and still carries `include`
+comments, so the origin-text route in its step 4 would reject every save on
+a deck with includes); Task 3's note-span translation is therefore unused by
+Task 6. Task 6 maps all four `ErrorKind::Parse` errors to `Unprocessable`.
+The design record carries the revised rules.
+
 **Verification.**
 
 ```sh
@@ -514,21 +538,27 @@ position, or content hash. For each call:
    `LoadedDeckSource::translate`. Do not call the transform entry point.
 2. Find the `ParsedSlide` whose `slide.key.as_str() == key`; a miss is a 409
    conflict whose message contains the requested key.
-3. Call `loaded.line_map.translate_span(&combined_source, span)` for
-   `slide.source_span` and every `slide.note_spans` entry. Require every call to
-   return `Some` and every `OriginSpan::file` to be the same file; bind that
-   file as `origin_path`. Read it once, strip and remember its leading BOM as
-   `origin_source`, then convert every span with
-   `origin_span_to_range(&origin_source, &span)`. On a refused translation,
-   mixed file, or failed coordinate conversion, return a conflict `BuildError`
-   at the translated slide start line and
-   `origin_for_display(&origin_path, input)`, with message
-   `this slide cannot be edited from preview`, and help built as
-   `format!("edit the note in {}", origin_path.display())`.
-4. Convert those origin ranges back to `SourceSpan`s and call
-   `rewrite_note` directly on the BOM-stripped origin text. This keeps the pure
-   rewrite single-source and never splices expanded-source offsets into an
-   origin file.
+3. Call `rewrite_note(&combined_source, slide.source_span, &slide.note_spans,
+   text, &highlighter)` on the combined source with the `ParsedSlide`'s own
+   spans (revised 2026-09-12 in Task 2: `rewrite_note` re-parses the text it
+   is given, so it must see the whole deck — an origin file parsed alone
+   lacks the top deck's frontmatter and still carries `include` comments).
+   Bytes outside the slide span are unchanged by contract. Strip one leading
+   BOM from both `combined_source` and `rewritten` before slicing (the spans
+   are relative to the stripped text and `rewrite_note` restores the BOM on
+   return); the rewritten slide is then
+   `rewritten[slide.source_span.start..slide.source_span.end +
+   (rewritten.len() - combined_source.len())]`.
+4. Call `loaded.line_map.translate_span(&combined_source, slide.source_span)`
+   for the slide span only (note spans need no translation). Require `Some`;
+   bind `OriginSpan::file` as `origin_path`. Read it once, strip and remember
+   its leading BOM as `origin_source`, then convert the span with
+   `origin_span_to_range(&origin_source, &span)`. On a refused translation or
+   failed coordinate conversion, return a conflict `BuildError` at the
+   translated slide start line and `origin_for_display(&origin_path, input)`,
+   with message `this slide cannot be edited from preview`, and help built as
+   `format!("edit the note in {}", origin_path.display())`. Splice the
+   rewritten slide bytes into `origin_source` at that range.
 5. Re-add the BOM byte-for-byte and call `server::write_atomic` in the origin
    directory.
 
@@ -538,19 +568,18 @@ report text. `DeckDiagnostic` is already `pub(crate)` in `diagnostics.rs` and
 is reachable because `main.rs` declares `mod diagnostics`, so no visibility
 change is needed. This covers frontmatter/include/parser/asset-definition
 failures. Classify generic reports from reading the top deck or loading syntax
-files as `Io`. Missing keys and refused spans are `Conflict`; map only
-`rewrite_note`'s two representability `ErrorKind::Parse` failures to
-`Unprocessable`; origin reads and `server::write_atomic` failures are `Io`.
+files as `Io`. Missing keys and refused spans are `Conflict`; map
+`rewrite_note`'s four `ErrorKind::Parse` failures (`-->`, leading `{`,
+postcondition, span mismatch) to `Unprocessable`; origin reads and
+`server::write_atomic` failures are `Io`.
 The classification test deletes the top deck after constructing the writer and
 creates a directory at the `deck.md.tmp` path used by `write_atomic`, giving
 deterministic read and write I/O failures without permission-dependent tests.
 
 Format parse reports with `plain_diagnostic_text` after
-`LoadedDeckSource::translate`. A rewrite error already uses origin-file
-offsets: attach `origin_for_display(&origin_path, input)` with
-`BuildError::with_origin_file`, wrap it in `DeckDiagnostic`, and call
-`plain_diagnostic_text` without translating it through the combined `LineMap`
-again. Construct the missing-key conflict with message
+`LoadedDeckSource::translate`. A rewrite error carries combined-source
+line numbers: translate it through the combined `LineMap` like any other
+parse report before formatting. Construct the missing-key conflict with message
 `slide key '{key}' not found in current deck` and help
 `reload preview and retry on a slide whose key still exists`; construct the
 span conflict with the message/help fixed in step 3. Wrap origin read and write

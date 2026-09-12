@@ -15,6 +15,7 @@ pub mod manifest;
 pub mod mapping;
 pub mod math;
 pub mod notes;
+pub mod notes_edit;
 pub mod parser;
 pub mod phase;
 mod plain;

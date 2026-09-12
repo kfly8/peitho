@@ -74,27 +74,57 @@ pub fn rewrite_note(
     slide: SourceSpan,
     notes: &[SourceSpan],
     text: &str,
+    highlighter: &Highlighter,
 ) -> Result<String>;
 ```
 
-Returns the full source with the slide's note rewritten. Rules:
+Returns the full source with the slide's note rewritten. Rules (revised
+2026-09-12 during Task 2 review, after measuring that in-place replacement
+inside containers, inline positions, and next to `---` produced files that no
+longer parsed back to the same deck):
 
 - `text` is trimmed the way the parser trims a comment body. Empty text
   removes every note comment and inserts nothing.
 - Single-line text is written as `<!-- text -->`; multi-line text as
   `<!--\ntext\n-->`.
-- The first note span is replaced by the new comment; every later note span
-  is removed. When a removed or replaced comment occupied whole lines, its
-  line ending goes with it so no blank lines accumulate. Saving the same
-  text twice is a no-op on the file (idempotent).
+- The first note span is replaced in place only when it is a whole-line
+  comment starting at column 0 (a top-level HTML block); that is the one
+  position where the canonical form is guaranteed to parse back as the same
+  note. Every other span (inline, indented, inside a blockquote) is removed,
+  and the canonical comment is appended after the slide's last non-blank line
+  instead. Later spans are always removed.
+- A removed whole-line comment takes its line ending with it, except when the
+  lines above and below are both non-blank: then the line becomes a blank
+  line (or a bare `>` inside a blockquote) so the neighbours never become
+  adjacent — `text` followed by `---` would otherwise turn into a setext
+  heading and silently merge two slides. Accepted consequence: a comment
+  line removed from inside a tight list (`- item` / `  <!-- note -->` /
+  `- next`) leaves a blank line that makes the list loose; deleting the line
+  outright is not safe in general (it would merge `- item` / `  <!-- c -->` /
+  `  more` into one paragraph), and the re-parse check does not compare
+  fragments, so this is a rendering-only change. Likewise a comment that is a
+  list item's sole content (`- <!-- x -->`) is not whole-line, so clearing it
+  leaves an empty `- ` bullet behind rather than deleting the item line.
+  Saving the same text twice is a no-op on the file (idempotent).
 - With no note span, the comment is appended after the last non-blank line
   of the slide body, separated by one blank line, followed by a newline.
+- The postcondition below is enforced inside `rewrite_note`: the source and
+  the candidate are both parsed with the caller's `Highlighter`, and the
+  candidate is returned only if slide count, keys, sections, every page
+  setting projection, and every other slide's notes are unchanged and the
+  target slide's notes equal the trimmed text. Otherwise the result is an
+  `ErrorKind::Parse` error (`speaker note cannot be written at this
+  position`) — for example when the slide ends inside an unclosed fenced code
+  block. The unchecked splice is private, so no caller can skip the check.
+- A leading BOM is stripped before splicing (spans are relative to the
+  stripped text, as in `parse_markdown`) and re-added to the result.
 - Line endings follow the file: if the source contains `\r\n`, inserted
   newlines are `\r\n`.
 - Rejected with a line-numbered `BuildError` and help: text containing
   `-->` (cannot be represented in an HTML comment) and text whose trimmed
   form starts with `{` (the parser would read it as a page settings comment
-  on the next build). Both are `ErrorKind::Parse` errors so the CLI maps
+  on the next build). These, the postcondition failure above, and spans that
+  do not match the source are all `ErrorKind::Parse` errors so the CLI maps
   them to 422.
 
 The postcondition is stated as a property: re-parsing the returned source
@@ -138,11 +168,14 @@ to the server:
    extracted from it; no duplicated syntax resolution).
 3. `parse_deck` → find the `ParsedSlide` whose key matches. Missing key →
    conflict.
-4. `rewrite_note` on the combined source, then translate the slide span to
-   the origin file via `LineMap` and splice the rewritten slide bytes into
-   the origin file text. (Equivalently: translate the spans first and
-   rewrite the origin file directly. The plan picks whichever keeps
-   `rewrite_note` single-source; the observable result is identical.)
+4. `rewrite_note` on the combined source with the `ParsedSlide`'s own
+   `source_span` and `note_spans`, then translate only the slide span to the
+   origin file via `LineMap` and splice the rewritten slide bytes into the
+   origin file text. The two routes are not equivalent (revised 2026-09-12):
+   `rewrite_note` re-parses the text it is given, and an origin file parsed
+   on its own lacks the top deck's frontmatter and still carries `include`
+   comments, so running it on origin text would reject every save on a deck
+   with includes.
 5. Write atomically (temp file + rename in the same directory; `write_atomic`
    already exists in `server.rs`). A mutex in the writer serializes
    concurrent saves.
