@@ -3346,6 +3346,10 @@ fn validate_unique_keys<'a>(slides: impl IntoIterator<Item = &'a ParsedSlide>) -
     Ok(())
 }
 
+pub(crate) fn is_page_settings_body(body: &str) -> bool {
+    body.starts_with('{')
+}
+
 fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
     let trimmed = raw.trim();
     if !trimmed.starts_with("<!--") || !trimmed.ends_with("-->") {
@@ -3355,7 +3359,7 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
         .trim_start_matches("<!--")
         .trim_end_matches("-->")
         .trim();
-    if !json.starts_with('{') {
+    if !is_page_settings_body(json) {
         return Ok(None);
     }
     if serde_json::from_str::<serde_json::Value>(json).is_ok_and(|value| {
