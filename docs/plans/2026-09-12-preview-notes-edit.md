@@ -851,6 +851,40 @@ and `focused` is boolean; malformed draft data is ignored without discarding a
 valid `mode` and `index`. `saveState` uses `notesTextareaKey`, not a grid
 selection whose note has never been rendered.
 
+**Revision (2026-09-13, PR for this task).** Review replaced the
+`transitionAfterNotesFlush(changesIndex, commit)` seam and `activateGridIndex`
+with one `commitTransition(index, mode)` method that owns every state mutation;
+`setIndex`, `enterGrid`, `exitGrid`, and the grid tile click all route through
+it. The gate predicate is "the textarea's key would change, or the panel would
+be hidden by entering grid mode", so grid selection moves are ungated, exiting
+grid to another slide flushes, and a dirty note never enters grid with a
+failed save hidden behind the panel (a failed flush keeps single mode with the
+error visible). A note counts as settled only when no flush is in flight and the
+value equals the map (`notesSettled()`, backed by a `flushesInFlight`
+counter); the synchronous gate, the post-await loop, and `saveState` all use
+that one predicate, because a value equal to a stale map during an in-flight
+save is not clean and would otherwise commit or persist a text-less draft and
+lose the queued write's effect. `destroy` bumps the transition sequence so
+a pending commit never runs after teardown. `PreviewDraft.text` is optional and
+present only when dirty at save time; the draft is stored only when dirty or
+focused; focus is restored in single mode only. `pagehide` posts the current
+snapshot directly with `keepalive` rather than queuing behind the chain, and
+the keepalive size fallback counts encoded bytes. `isDirty(key, text)` and
+`stateIndex()` are the single sources shared by the flush path, the gate, and
+state save/restore. `commitTransition` returns early on a no-op (same index, selection, and
+mode) before bumping the sequence, so Enter or a click on the current
+thumbnail cannot cancel a pending gated navigation. Tests added:
+`clean_draft_does_not_overwrite_freshly_loaded_notes`,
+`destroy_cancels_a_pending_transition_commit`,
+`transition_waits_for_every_queued_flush`,
+`reload_state_keeps_text_while_a_save_is_in_flight`,
+`a_no_op_transition_does_not_cancel_a_pending_one`,
+`pagehide_before_load_keeps_the_stored_state` (`saveState` is a no-op until
+`load` finished), `restores_an_unfocused_draft_without_focusing`,
+`drops_a_draft_whose_key_is_gone`, a multibyte keepalive case, and `navigating_away_and_back_during_an_in_flight_save_does_not_revert_
+it` now exercises the real hazard (value returned to the stale map value while
+the first save is in flight).
+
 **Verification.**
 
 ```sh

@@ -544,6 +544,11 @@ var PREVIEW_STRIP_WIDTH = 200;
 var STRIP_PADDING = 12;
 var STRIP_GAP = 10;
 var NO_NOTES_PLACEHOLDER = "No notes for this slide.";
+function isPreviewDraft(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const draft = value;
+  return typeof draft.key === "string" && (draft.text === void 0 || typeof draft.text === "string") && typeof draft.selectionStart === "number" && Number.isFinite(draft.selectionStart) && draft.selectionStart >= 0 && typeof draft.selectionEnd === "number" && Number.isFinite(draft.selectionEnd) && draft.selectionEnd >= 0 && typeof draft.focused === "boolean";
+}
 function previewGridColumnCount(rootWidth) {
   const columns = Math.floor(
     (rootWidth - GRID_PADDING * 2 + GRID_GAP) / (GRID_TILE_WIDTH + GRID_GAP)
@@ -643,6 +648,8 @@ var PreviewShellController = class {
   notesPositionText;
   notesTextareaKey = null;
   flushChain = Promise.resolve(true);
+  flushesInFlight = 0;
+  transitionSequence = 0;
   strip;
   tileClickGuardCleanups = [];
   fontScopeCleanup = null;
@@ -670,6 +677,12 @@ var PreviewShellController = class {
   onResize = () => this.applyLayout();
   onNotesBlur = () => {
     void this.flushNotes();
+  };
+  onPageHide = () => {
+    this.saveState();
+    const key = this.notesTextareaKey;
+    const text = this.notesTextarea.value;
+    void this.doFlush(key, text, true);
   };
   constructor(options) {
     this.root = options.root;
@@ -704,6 +717,7 @@ var PreviewShellController = class {
     this.bus.addEventListener("peitho:navigate", this.onNavigate);
     this.bus.addEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.win.addEventListener("resize", this.onResize);
+    this.win.addEventListener("pagehide", this.onPageHide);
   }
   async load() {
     try {
@@ -742,6 +756,8 @@ var PreviewShellController = class {
       this.selectedIndex = restoredIndex;
       this.mode = restored?.mode ?? DEFAULT_PREVIEW_MODE;
       this.applyLayout();
+      if (this.notesTextareaKey === null) this.renderNotes();
+      this.restoreDraft(restored?.draft);
       this.dispatchSlideChange(null);
     } catch (error) {
       this.clearCanvasRootProperties();
@@ -753,27 +769,31 @@ var PreviewShellController = class {
     if (!this.isLoaded()) return;
     this.navigateToTarget(to);
   }
-  flushNotes(keepalive = false) {
+  flushNotes() {
     const key = this.notesTextareaKey;
     const text = this.notesTextarea.value;
+    this.flushesInFlight += 1;
     this.flushChain = this.flushChain.then(
-      () => this.doFlush(key, text, keepalive),
-      () => this.doFlush(key, text, keepalive)
-    );
+      () => this.doFlush(key, text, false),
+      () => this.doFlush(key, text, false)
+    ).finally(() => {
+      this.flushesInFlight -= 1;
+    });
     return this.flushChain;
   }
   async doFlush(key, text, keepalive) {
     if (key === null) return true;
-    const dirty = text !== (this.notes.notes[key] ?? "");
-    if (!dirty) {
+    if (!this.isDirty(key, text)) {
       this.notesStatus.textContent = "";
       return true;
     }
     try {
+      const requestBody = JSON.stringify({ key, text });
+      if (keepalive && new TextEncoder().encode(requestBody).length > 6e4) keepalive = false;
       const response = await this.fetcher("/notes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key, text }),
+        body: requestBody,
         keepalive
       });
       if (response.ok) {
@@ -802,18 +822,29 @@ var PreviewShellController = class {
     return true;
   }
   saveState() {
-    const index = this.clampIndex(this.selectedIndex >= 0 ? this.selectedIndex : this.currentIndex);
-    try {
-      this.storage?.setItem(PREVIEW_STATE_KEY, JSON.stringify({ mode: this.mode, index }));
-    } catch (error) {
-      this.log.error(`Failed to save preview state: ${String(error)}`);
+    if (!this.isLoaded()) return;
+    const state = { mode: this.mode, index: this.stateIndex() };
+    const focused = this.doc.activeElement === this.notesTextarea;
+    const dirty = !this.notesSettled();
+    if (this.notesTextareaKey !== null && (dirty || focused)) {
+      const draft = {
+        key: this.notesTextareaKey,
+        selectionStart: this.notesTextarea.selectionStart,
+        selectionEnd: this.notesTextarea.selectionEnd,
+        focused
+      };
+      if (dirty) draft.text = this.notesTextarea.value;
+      state.draft = draft;
     }
+    this.writeState(state);
   }
   destroy() {
+    this.transitionSequence += 1;
     this.notesTextarea.removeEventListener("blur", this.onNotesBlur);
     this.bus.removeEventListener("peitho:navigate", this.onNavigate);
     this.bus.removeEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.win.removeEventListener("resize", this.onResize);
+    this.win.removeEventListener("pagehide", this.onPageHide);
     while (this.tileClickGuardCleanups.length > 0) this.tileClickGuardCleanups.pop()?.();
     this.fontScopeCleanup?.();
     this.fontScopeCleanup = null;
@@ -849,8 +880,7 @@ var PreviewShellController = class {
     this.tileClickGuardCleanups.push(() => clickGuard.destroy());
     tile.addEventListener("click", (event) => {
       if (clickGuard.shouldIgnoreClick(event)) return;
-      this.setIndex(slide.index);
-      this.exitGrid();
+      this.commitTransition(slide.index, "single");
     });
     const host = this.createSlideHost(slide, html, css, "peitho-preview-slide");
     tile.appendChild(host);
@@ -1005,32 +1035,54 @@ var PreviewShellController = class {
     else this.enterGrid();
   }
   enterGrid() {
-    if (this.mode === "grid") return;
-    this.mode = "grid";
-    this.selectedIndex = this.clampIndex(this.currentIndex);
-    this.applyLayout();
-    this.saveState();
+    this.commitTransition(this.currentIndex, "grid");
   }
   exitGrid() {
-    if (this.mode === "single") return;
-    this.mode = "single";
-    this.selectedIndex = this.clampIndex(this.selectedIndex);
-    this.currentIndex = this.selectedIndex;
-    this.applyLayout();
-    this.saveState();
+    this.commitTransition(this.selectedIndex, "single");
   }
   activateSelection() {
     this.exitGrid();
   }
   setIndex(index) {
-    const next = this.clampIndex(index);
-    if (next === this.currentIndex && next === this.selectedIndex) return;
-    const previousIndex = this.currentIndex < 0 ? null : this.currentIndex;
-    this.currentIndex = next;
-    this.selectedIndex = next;
-    this.applyLayout();
-    this.dispatchSlideChange(previousIndex);
-    this.saveState();
+    this.commitTransition(index, this.mode);
+  }
+  commitTransition(index, mode) {
+    index = this.clampIndex(index);
+    if (index === this.currentIndex && index === this.selectedIndex && mode === this.mode) return;
+    const sequence = ++this.transitionSequence;
+    const needsFlush = mode === "grid" && this.mode === "single" || mode === "single" && this.slides[index]?.meta.key !== this.notesTextareaKey;
+    const commit = () => {
+      const previousIndex = this.currentIndex < 0 ? null : this.currentIndex;
+      this.currentIndex = index;
+      this.selectedIndex = index;
+      this.mode = mode;
+      this.applyLayout();
+      if (previousIndex !== index) this.dispatchSlideChange(previousIndex);
+      this.saveState();
+    };
+    if (!needsFlush || this.notesSettled()) {
+      commit();
+      return;
+    }
+    void (async () => {
+      while (true) {
+        const flushed = await this.flushNotes();
+        if (sequence !== this.transitionSequence || !flushed) return;
+        if (this.notesSettled()) {
+          commit();
+          return;
+        }
+      }
+    })();
+  }
+  notesAreDirty() {
+    return this.isDirty(this.notesTextareaKey, this.notesTextarea.value);
+  }
+  notesSettled() {
+    return this.flushesInFlight === 0 && !this.notesAreDirty();
+  }
+  isDirty(key, text) {
+    return key !== null && text !== (this.notes.notes[key] ?? "");
   }
   resolveTarget(to) {
     if (to === "first") return 0;
@@ -1234,12 +1286,36 @@ var PreviewShellController = class {
     try {
       const parsed = JSON.parse(raw);
       if ((parsed.mode === "single" || parsed.mode === "grid") && typeof parsed.index === "number") {
-        return { mode: parsed.mode, index: parsed.index };
+        const state = { mode: parsed.mode, index: parsed.index };
+        if (isPreviewDraft(parsed.draft)) state.draft = parsed.draft;
+        return state;
       }
     } catch (_error) {
       return null;
     }
     return null;
+  }
+  restoreDraft(draft) {
+    if (draft === void 0) return;
+    const key = this.slides[this.currentIndex]?.meta.key;
+    if (draft.key === key) {
+      if (draft.text !== void 0) this.notesTextarea.value = draft.text;
+      const selectionStart = Math.min(draft.selectionStart, this.notesTextarea.value.length);
+      const selectionEnd = Math.min(draft.selectionEnd, this.notesTextarea.value.length);
+      if (draft.focused && this.mode === "single") this.notesTextarea.focus();
+      this.notesTextarea.setSelectionRange(selectionStart, selectionEnd);
+    }
+    this.writeState({ mode: this.mode, index: this.stateIndex() });
+  }
+  stateIndex() {
+    return this.clampIndex(this.selectedIndex >= 0 ? this.selectedIndex : this.currentIndex);
+  }
+  writeState(state) {
+    try {
+      this.storage?.setItem(PREVIEW_STATE_KEY, JSON.stringify(state));
+    } catch (error) {
+      this.log.error(`Failed to save preview state: ${String(error)}`);
+    }
   }
 };
 export {
