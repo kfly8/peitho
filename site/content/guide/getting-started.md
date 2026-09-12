@@ -80,7 +80,8 @@ preserving the current slide and overview mode.
 In preview, `o` toggles single-slide and tile overview modes, while Esc returns
 to the overview and Enter opens the selected tile; arrows move through slides
 and overview tiles, and clicking a tile opens it. The single-slide view keeps a
-filmstrip of thumbnails on the left; clicking one jumps to that slide.
+filmstrip of thumbnails on the left; Up/Down walk it and clicking one jumps to
+that slide.
 
 ![The overview view: every slide as a tile in a scrollable grid](/guide-shots/preview-overview.png)
 

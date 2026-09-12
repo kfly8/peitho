@@ -503,7 +503,10 @@ class PreviewShellController implements PreviewShell {
       if (this.mode === "grid") return Math.max(this.selectedIndex - 1, 0);
       return this.resolveSequentialTarget(-1);
     }
-    if (to === "up" || to === "down") return this.resolveGridVerticalTarget(to);
+    if (to === "up" || to === "down") {
+      if (this.mode === "grid") return this.resolveGridVerticalTarget(to);
+      return this.resolveSequentialTarget(to === "up" ? -1 : 1);
+    }
     if ("index" in to) {
       if (to.index < 0 || to.index >= this.slides.length) {
         this.log.error(`Unknown slide index: ${to.index}`);
@@ -528,7 +531,6 @@ class PreviewShellController implements PreviewShell {
   }
 
   private resolveGridVerticalTarget(direction: "up" | "down"): number | null {
-    if (this.mode !== "grid") return null;
     const columns = previewGridColumnCount(this.gridRootWidth());
     const selected = this.clampIndex(this.selectedIndex);
     const next = selected + (direction === "up" ? -columns : columns);

@@ -32,6 +32,8 @@ PowerPoint) keeps a filmstrip of thumbnails beside the stage for exactly this.
 - Single mode fits the stage into the viewport minus the strip width and the
   notes height; the tile and the notes panel start at `PREVIEW_STRIP_WIDTH`.
   The current thumbnail is outlined and scrolled into view (`block: nearest`).
+- ArrowUp/ArrowDown in single mode walk the filmstrip (skip-aware, like
+  left/right); in grid mode they still move by a row.
 - Grid mode hides the strip, exactly as it hides the notes panel.
 - No new event, sync message, manifest field, or storage key: the filmstrip
   is a projection of the existing `currentIndex`.

@@ -689,36 +689,6 @@ it("grid vertical navigation moves by one computed row and stops at row edges", 
   expect(shell.selectedIndex).toBe(6);
 });
 
-it("single mode ignores preview vertical navigation requests", async () => {
-  const bus = new EventTarget();
-  const root = document.createElement("main");
-  setRootWidth(root, 1044);
-  const shell = await mountPreviewShell({
-    root,
-    bus,
-    fetcher: fetchForManifest(manifestWithSlideCount(7)),
-    window,
-    storage: sessionStorage,
-    viewport: () => ({ width: 1044, height: 720 })
-  });
-  shells.push(shell);
-
-  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
-  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 3 } } }));
-  const saved = sessionStorage.getItem("peitho:preview-state");
-  const up = new CustomEvent("peitho:navigate", { cancelable: true, detail: { to: "up" } });
-  const down = new CustomEvent("peitho:navigate", { cancelable: true, detail: { to: "down" } });
-  bus.dispatchEvent(up);
-  bus.dispatchEvent(down);
-
-  expect(shell.mode).toBe("single");
-  expect(shell.currentIndex).toBe(3);
-  expect(shell.selectedIndex).toBe(3);
-  expect(sessionStorage.getItem("peitho:preview-state")).toBe(saved);
-  expect(up.defaultPrevented).toBe(false);
-  expect(down.defaultPrevented).toBe(false);
-});
-
 it("clicking a grid tile shows that slide in single mode", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
@@ -1095,4 +1065,30 @@ it("hides the filmstrip in grid mode", async () => {
   bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
   expect(strip.hidden).toBe(false);
   expect(strip.style.display).toBe("flex");
+});
+
+it("walks the filmstrip with ArrowUp/ArrowDown in single mode, skipping skipped slides", async () => {
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const deck = manifestWithSlides([{ key: "a" }, { key: "b", skip: true }, { key: "c" }]);
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fetchForManifest(deck),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const down = new CustomEvent("peitho:navigate", { cancelable: true, detail: { to: "down" } });
+  bus.dispatchEvent(down);
+  expect(down.defaultPrevented).toBe(true);
+  expect(shell.currentIndex).toBe(2);
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "up" } }));
+  expect(shell.currentIndex).toBe(0);
+  const atStart = new CustomEvent("peitho:navigate", { cancelable: true, detail: { to: "up" } });
+  bus.dispatchEvent(atStart);
+  expect(atStart.defaultPrevented).toBe(false);
+  expect(shell.currentIndex).toBe(0);
 });
