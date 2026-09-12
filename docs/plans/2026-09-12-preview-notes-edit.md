@@ -485,6 +485,25 @@ staging path `rehearsal-X.json.tmp`. No present call site installs a writer, so
 `peitho present` and every default server answer 404 for every body, including
 malformed input.
 
+**Revision (2026-09-13, PR for this task).** Review changed the server
+contract in four ways, all recorded in the design record: the route requires
+a `Content-Type` whose media type is `application/json` (400
+`invalid notes content type` otherwise) so a cross-origin simple request from
+another page cannot rewrite the deck without a CORS preflight, which the
+server rejects; the writer is `Box<dyn FnMut(&SlideKey, &str) -> Result<(),
+NotesWriteError> + Send>` stored as `Option<Arc<Mutex<NotesWriter>>>` and the
+server holds the lock around the single call, so Task 6 needs no mutex of its
+own; `NotesRequest.key` is a `SlideKey` (malformed keys are 400 before any
+deck work); and `write_atomic` follows an existing symlink to its canonical
+target, copies the target's permissions onto the staging file, and removes
+the staging file when the rename fails. An `Io` failure is also logged to
+stderr before the 500, as the rehearsal path does. A poisoned writer lock is
+recovered rather than turned into a permanent 500. The review added
+`notes_route_requires_json_content_type`,
+`notes_route_serializes_concurrent_saves`,
+`write_atomic_follows_symlinks_and_keeps_permissions`, and
+`write_atomic_removes_tmp_when_rename_fails` to the test list above.
+
 **Verification.**
 
 ```sh
@@ -553,9 +572,11 @@ fn write_preview_note(
 fn preview_notes_writer(input: PathBuf) -> server::NotesWriter;
 ```
 
-The boxed closure owns a `Mutex<()>` and holds it for the complete
-read/parse/rewrite/write transaction; it captures no parsed deck, source
-position, or content hash. For each call:
+The closure captures no parsed deck, source position, or content hash and
+needs no lock of its own: the server holds `Mutex<NotesWriter>` around every
+call (revised 2026-09-13 in Task 5), so the read/parse/rewrite/write
+transaction is serialized by construction. The writer receives the key as a
+validated `&SlideKey`; compare it with `slide.key == *key`. For each call:
 
 1. Call `load_and_expand_deck_source(input)`, bind the combined string as
    `combined_source` (expansion has already stripped every leading BOM),

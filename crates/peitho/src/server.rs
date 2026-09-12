@@ -14,7 +14,9 @@ use std::{
 };
 
 use chrono::{Local, NaiveDateTime};
-use peitho_core::{rehearsal_record_json, RehearsalRecord, RehearsalSection, RehearsalSnapshot};
+use peitho_core::{
+    domain::SlideKey, rehearsal_record_json, RehearsalRecord, RehearsalSection, RehearsalSnapshot,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
@@ -23,6 +25,7 @@ static SERVER_CLOCK_START: OnceLock<Instant> = OnceLock::new();
 static SYNC_SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const REMOTE_WEBMANIFEST: &str = r##"{"name":"Peitho Remote","short_name":"Remote","start_url":"/remote","display":"standalone","background_color":"#101216","theme_color":"#101216","icons":[{"src":"remote-icon.png","sizes":"180x180","type":"image/png"}]}"##;
 const REMOTE_ICON_PNG: &[u8] = include_bytes!("../assets/remote-icon.png");
+const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 
 fn new_sync_session() -> String {
     let millis = SystemTime::now()
@@ -365,10 +368,21 @@ pub struct PresentServer {
     default_document: String,
     serve_remote_assets: bool,
     rehearsal_sink: Option<Arc<RehearsalSink>>,
+    notes_writer: Option<Arc<Mutex<NotesWriter>>>,
     server: Arc<Server>,
     listeners: Arc<Mutex<Vec<Arc<Server>>>>,
     sync: SyncHub,
     pointer: PointerHub,
+}
+
+pub type NotesWriter =
+    Box<dyn FnMut(&SlideKey, &str) -> Result<(), NotesWriteError> + Send + 'static>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotesWriteError {
+    Conflict(String),
+    Unprocessable(String),
+    Io(String),
 }
 
 #[derive(Debug)]
@@ -508,6 +522,7 @@ impl PresentServer {
             default_document: default_document.to_owned(),
             serve_remote_assets,
             rehearsal_sink: None,
+            notes_writer: None,
             server: server.clone(),
             listeners: Arc::new(Mutex::new(vec![server])),
             sync,
@@ -517,6 +532,11 @@ impl PresentServer {
 
     pub fn with_rehearsal_sink(mut self, sink: RehearsalSink) -> Self {
         self.rehearsal_sink = Some(Arc::new(sink));
+        self
+    }
+
+    pub fn with_notes_writer(mut self, writer: NotesWriter) -> Self {
+        self.notes_writer = Some(Arc::new(Mutex::new(writer)));
         self
     }
 
@@ -622,6 +642,10 @@ impl PresentServer {
             }
             (&Method::Post, "/rehearsal") => {
                 self.respond_rehearsal_post(request);
+                return;
+            }
+            (&Method::Post, "/notes") => {
+                self.respond_notes_post(request);
                 return;
             }
             _ => {}
@@ -771,6 +795,61 @@ impl PresentServer {
         );
     }
 
+    fn respond_notes_post(&self, mut request: tiny_http::Request) {
+        let Some(writer) = self.notes_writer.as_deref() else {
+            send_response(
+                request,
+                Response::from_string("404\n").with_status_code(StatusCode(404)),
+            );
+            return;
+        };
+        if !notes_request_has_json_content_type(&request) {
+            send_response(
+                request,
+                Response::from_string("invalid notes content type\n")
+                    .with_status_code(StatusCode(400)),
+            );
+            return;
+        }
+
+        let mut body = String::new();
+        let notes = request
+            .as_reader()
+            .read_to_string(&mut body)
+            .ok()
+            .and_then(|_| serde_json::from_str::<NotesRequest>(&body).ok());
+        let Some(notes) = notes else {
+            send_response(
+                request,
+                Response::from_string("invalid notes body\n").with_status_code(StatusCode(400)),
+            );
+            return;
+        };
+
+        let mut writer = writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = writer(&notes.key, &notes.text);
+        match result {
+            Ok(()) => send_json_response(request, serde_json::json!({ "saved": true }).to_string()),
+            Err(err) => {
+                let (status, message) = match err {
+                    NotesWriteError::Conflict(message) => (409, message),
+                    NotesWriteError::Unprocessable(message) => (422, message),
+                    NotesWriteError::Io(message) => {
+                        eprintln!("warning: failed to write speaker note: {message}");
+                        (500, message)
+                    }
+                };
+                send_json_response_with_status(
+                    request,
+                    status,
+                    serde_json::json!({ "error": message }).to_string(),
+                );
+            }
+        }
+    }
+
     fn respond_static(&self, request: tiny_http::Request) {
         let root = self
             .root
@@ -800,6 +879,20 @@ impl PresentServer {
             }
         }
     }
+}
+
+fn notes_request_has_json_content_type(request: &tiny_http::Request) -> bool {
+    request.headers().iter().any(|header| {
+        header.field.equiv("Content-Type")
+            && header
+                .value
+                .as_str()
+                .split(';')
+                .next()
+                .is_some_and(|media_type| {
+                    media_type.trim().eq_ignore_ascii_case("application/json")
+                })
+    })
 }
 
 fn validate_extra_listener_host(host: IpAddr) -> miette::Result<()> {
@@ -843,6 +936,13 @@ enum SyncMessage {
     Swap(SyncSwapMessage),
     Timer(SyncTimerMessage),
     Close(SyncCloseMessage),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotesRequest {
+    key: SlideKey,
+    text: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1223,11 +1323,37 @@ fn first_rehearsal_write_error(path: &Path, err: io::Error) -> io::Error {
     )
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    // Crash-orphaned *.json.tmp files do not match the record scheme and are not swept because sweeping could race an in-flight rename.
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path)
+fn atomic_tmp_path(path: &Path) -> PathBuf {
+    let mut file_name = path.file_name().unwrap_or_default().to_os_string();
+    file_name.push(".tmp");
+    path.with_file_name(file_name)
+}
+
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let (target, permissions) = if path.exists() {
+        let target = fs::canonicalize(path)?;
+        let permissions = fs::metadata(&target)?.permissions();
+        (target, Some(permissions))
+    } else {
+        (path.to_path_buf(), None)
+    };
+    // Stage as `<file name>.tmp` next to the target. Orphaned tmp files (a crash
+    // between write and rename) are not swept because sweeping could race an
+    // in-flight rename; deck.md.tmp does not match the .md watch roots, and
+    // rehearsal-X.json.tmp does not match the record scheme.
+    let tmp = atomic_tmp_path(&target);
+    let result = (|| {
+        fs::write(&tmp, bytes)?;
+        if let Some(permissions) = permissions {
+            fs::set_permissions(&tmp, permissions)?;
+        }
+        fs::rename(&tmp, &target)
+    })();
+    if let Err(err) = result {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
 }
 
 fn epoch_ms_now() -> u64 {
@@ -1245,29 +1371,36 @@ fn server_clock_ms() -> u64 {
 }
 
 fn send_json_response(request: tiny_http::Request, body: String) {
-    send_bytes_response(request, "application/json; charset=utf-8", body.as_bytes());
+    send_json_response_with_status(request, 200, body);
+}
+
+fn send_json_response_with_status(request: tiny_http::Request, status: u16, body: String) {
+    send_bytes_response(request, status, JSON_CONTENT_TYPE, body.as_bytes());
 }
 
 fn send_remote_webmanifest_response(request: tiny_http::Request) {
     send_bytes_response(
         request,
+        200,
         "application/manifest+json",
         REMOTE_WEBMANIFEST.as_bytes(),
     );
 }
 
 fn send_remote_icon_response(request: tiny_http::Request) {
-    send_bytes_response(request, "image/png", REMOTE_ICON_PNG);
+    send_bytes_response(request, 200, "image/png", REMOTE_ICON_PNG);
 }
 
-fn send_bytes_response(request: tiny_http::Request, content_type: &str, body: &[u8]) {
+fn send_bytes_response(request: tiny_http::Request, status: u16, content_type: &str, body: &[u8]) {
     let Ok(header) = Header::from_bytes("Content-Type", content_type) else {
         eprintln!("warning: failed to build Content-Type header");
         return;
     };
     send_response(
         request,
-        Response::from_data(body.to_vec()).with_header(header),
+        Response::from_data(body.to_vec())
+            .with_status_code(StatusCode(status))
+            .with_header(header),
     );
 }
 
@@ -1287,6 +1420,7 @@ mod tests {
         io::{Read, Write},
         net::{Shutdown, TcpStream},
         path::Path,
+        sync::atomic::AtomicUsize,
         time::Duration,
     };
 
@@ -2028,6 +2162,68 @@ mod tests {
     }
 
     #[test]
+    fn write_atomic_appends_tmp_to_the_full_file_name() {
+        assert_eq!(
+            atomic_tmp_path(Path::new("deck.md")),
+            PathBuf::from("deck.md.tmp")
+        );
+        assert_eq!(
+            atomic_tmp_path(Path::new("rehearsal-X.json")),
+            PathBuf::from("rehearsal-X.json.tmp")
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deck.md");
+        write_atomic(&path, b"new contents").unwrap();
+
+        assert!(path.exists());
+        assert_eq!(fs::read(&path).unwrap(), b"new contents");
+        assert!(!atomic_tmp_path(&path).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_follows_symlinks_and_keeps_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("deck.md");
+        let link = dir.path().join("linked-deck.md");
+        fs::write(&target, b"old contents").unwrap();
+        let mut permissions = fs::metadata(&target).unwrap().permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&target, permissions).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_atomic(&link, b"new contents").unwrap();
+
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), b"new contents");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn write_atomic_removes_tmp_when_rename_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("deck.md");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("keep"), b"keep").unwrap();
+        let canonical_target = fs::canonicalize(&target).unwrap();
+        let tmp = atomic_tmp_path(&canonical_target);
+
+        assert!(write_atomic(&target, b"new contents").is_err());
+
+        assert!(!tmp.exists());
+        assert_eq!(fs::read(target.join("keep")).unwrap(), b"keep");
+    }
+
+    #[test]
     fn non_rehearsal_server_discards_rehearsal_reports() {
         let response = rehearsal_post_outcome(
             None,
@@ -2152,6 +2348,204 @@ mod tests {
     }
 
     #[test]
+    fn notes_route_saves_with_writer() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_by_writer = Arc::clone(&captured);
+        let server = notes_server(Box::new(move |key, text| {
+            captured_by_writer
+                .lock()
+                .unwrap()
+                .push((key.as_str().to_owned(), text.to_owned()));
+            Ok(())
+        }));
+
+        let saved = json_http_request(
+            &server,
+            "POST",
+            "/notes",
+            r#"{"key":"intro","text":"new note"}"#,
+        );
+
+        assert_eq!(saved.status, 200);
+        assert_eq!(saved.body, r#"{"saved":true}"#);
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured
+                .first()
+                .map(|(key, text)| (key.as_str(), text.as_str())),
+            Some(("intro", "new note")),
+        );
+    }
+
+    #[test]
+    fn notes_route_rejects_invalid_shapes() {
+        let calls = Arc::new(Mutex::new(0));
+        let calls_by_writer = Arc::clone(&calls);
+        let server = notes_server(Box::new(move |_, _| {
+            *calls_by_writer.lock().unwrap() += 1;
+            Ok(())
+        }));
+
+        let malformed = json_http_request(&server, "POST", "/notes", "{");
+        let missing_field = json_http_request(&server, "POST", "/notes", r#"{"key":"intro"}"#);
+        let unknown_field = json_http_request(
+            &server,
+            "POST",
+            "/notes",
+            r#"{"key":"intro","text":"new note","extra":true}"#,
+        );
+        let malformed_key =
+            json_http_request(&server, "POST", "/notes", r#"{"key":"Bad Key","text":"x"}"#);
+
+        assert_eq!(malformed.status, 400);
+        assert_eq!(malformed.body, "invalid notes body\n");
+        assert_eq!(missing_field.status, 400);
+        assert_eq!(missing_field.body, "invalid notes body\n");
+        assert_eq!(unknown_field.status, 400);
+        assert_eq!(unknown_field.body, "invalid notes body\n");
+        assert_eq!(malformed_key.status, 400);
+        assert_eq!(malformed_key.body, "invalid notes body\n");
+        assert_eq!(*calls.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn notes_route_without_writer_returns_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PresentServer::bind(dir.path().to_path_buf(), 0, "present.html").unwrap();
+
+        let without_writer = http_request(&server, "POST", "/notes", "{");
+
+        assert_eq!(without_writer.status, 404);
+        assert_eq!(without_writer.body, "404\n");
+    }
+
+    #[test]
+    fn notes_route_maps_conflict_to_409() {
+        let server = notes_server(Box::new(|_, _| {
+            Err(NotesWriteError::Conflict("note target changed".to_owned()))
+        }));
+
+        let conflict = json_http_request(
+            &server,
+            "POST",
+            "/notes",
+            r#"{"key":"intro","text":"new note"}"#,
+        );
+
+        assert_eq!(conflict.status, 409);
+        assert_eq!(conflict.body, r#"{"error":"note target changed"}"#);
+    }
+
+    #[test]
+    fn notes_route_maps_unprocessable_to_422() {
+        const MESSAGE: &str = "line 3: speaker note cannot contain '-->'\n  = help: remove or rewrite '-->' because it closes the HTML comment";
+
+        let server = notes_server(Box::new(|_, _| {
+            Err(NotesWriteError::Unprocessable(MESSAGE.to_owned()))
+        }));
+
+        let unprocessable = json_http_request(
+            &server,
+            "POST",
+            "/notes",
+            r#"{"key":"intro","text":"new note"}"#,
+        );
+
+        assert_eq!(unprocessable.status, 422);
+        assert_eq!(
+            serde_json::from_str::<Value>(&unprocessable.body).unwrap()["error"],
+            MESSAGE
+        );
+    }
+
+    #[test]
+    fn notes_route_maps_io_to_500() {
+        let server = notes_server(Box::new(|_, _| {
+            Err(NotesWriteError::Io("failed to write deck.md".to_owned()))
+        }));
+
+        let io_failure = json_http_request(
+            &server,
+            "POST",
+            "/notes",
+            r#"{"key":"intro","text":"new note"}"#,
+        );
+
+        assert_eq!(io_failure.status, 500);
+        assert_eq!(io_failure.body, r#"{"error":"failed to write deck.md"}"#);
+    }
+
+    #[test]
+    fn notes_route_requires_json_content_type() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_by_writer = Arc::clone(&calls);
+        let server = notes_server(Box::new(move |_, _| {
+            calls_by_writer.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        let body = r#"{"key":"intro","text":"new note"}"#;
+
+        let text_plain =
+            http_request_with_content_type(&server, "POST", "/notes", body, Some("text/plain"));
+        let missing = http_request_with_content_type(&server, "POST", "/notes", body, None);
+
+        assert_eq!(text_plain.status, 400);
+        assert_eq!(text_plain.body, "invalid notes content type\n");
+        assert_eq!(missing.status, 400);
+        assert_eq!(missing.body, "invalid notes content type\n");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let with_parameters = http_request_with_content_type(
+            &server,
+            "POST",
+            "/notes",
+            body,
+            Some("application/json; charset=utf-8"),
+        );
+
+        assert_eq!(with_parameters.status, 200);
+        assert_eq!(with_parameters.body, r#"{"saved":true}"#);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn notes_route_serializes_concurrent_saves() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let in_flight_by_writer = Arc::clone(&in_flight);
+        let max_in_flight_by_writer = Arc::clone(&max_in_flight);
+        let server = notes_server(Box::new(move |_, _| {
+            let current = in_flight_by_writer.fetch_add(1, Ordering::SeqCst) + 1;
+            max_in_flight_by_writer.fetch_max(current, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(50));
+            in_flight_by_writer.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }));
+
+        let handles = (0..4)
+            .map(|index| {
+                let server = server.clone();
+                thread::spawn(move || {
+                    json_http_request(
+                        &server,
+                        "POST",
+                        "/notes",
+                        &format!(r#"{{"key":"slide-{index}","text":"new note"}}"#),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let responses = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(responses.iter().all(|response| response.status == 200));
+        assert_eq!(max_in_flight.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn get_rehearsal_is_not_a_route() {
         let dir = tempfile::tempdir().unwrap();
         let server = PresentServer::bind(dir.path().to_path_buf(), 0, "present.html").unwrap();
@@ -2222,18 +2616,46 @@ mod tests {
         body: String,
     }
 
+    fn notes_server(writer: NotesWriter) -> PresentServer {
+        PresentServer::bind(PathBuf::new(), 0, "present.html")
+            .unwrap()
+            .with_notes_writer(writer)
+    }
+
     fn http_request(
         server: &PresentServer,
         method: &str,
         path: &str,
         body: &str,
     ) -> TestHttpResponse {
+        http_request_with_content_type(server, method, path, body, None)
+    }
+
+    fn json_http_request(
+        server: &PresentServer,
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> TestHttpResponse {
+        http_request_with_content_type(server, method, path, body, Some("application/json"))
+    }
+
+    fn http_request_with_content_type(
+        server: &PresentServer,
+        method: &str,
+        path: &str,
+        body: &str,
+        content_type: Option<&str>,
+    ) -> TestHttpResponse {
         let addr = server.addr();
         let server_for_request = server.clone();
         let handle = thread::spawn(move || server_for_request.handle_one());
         let mut stream = TcpStream::connect(addr).unwrap();
+        let content_type_header = content_type
+            .map(|content_type| format!("Content-Type: {content_type}\r\n"))
+            .unwrap_or_default();
         let request = format!(
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n{content_type_header}Connection: close\r\n\r\n{body}",
             body.len()
         );
         stream.write_all(request.as_bytes()).unwrap();
