@@ -376,6 +376,30 @@ it("preview_keyboard_only_dispatches_page_keys_from_editable_targets", () => {
   }
 });
 
+it("preview_keyboard_leaves_enter_on_links_untouched", () => {
+  const bus = new EventTarget();
+  const overviewRequests: unknown[] = [];
+  bus.addEventListener("peitho:overviewrequest", (event) =>
+    overviewRequests.push((event as CustomEvent).detail)
+  );
+  cleanups.push(installPreviewKeyboard(window, bus));
+  const link = document.createElement("a");
+  link.href = "#x";
+  document.body.appendChild(link);
+  cleanups.push(() => link.remove());
+  link.focus();
+
+  const enter = new KeyboardEvent("keydown", {
+    key: "Enter",
+    bubbles: true,
+    cancelable: true
+  });
+  link.dispatchEvent(enter);
+
+  expect(overviewRequests).toEqual([]);
+  expect(enter.defaultPrevented).toBe(false);
+});
+
 it("editable_page_navigation_is_prevented_only_when_accepted", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
@@ -725,18 +749,168 @@ it("Escape in grid mode stays in grid mode", async () => {
   expect(shell.selectedIndex).toBe(2);
 });
 
-it("Enter activate request in single mode stays in single mode", async () => {
+it("repeated_enter_in_grid_mode_is_ignored", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
   const shell = await mountForTest(root, bus);
+  cleanups.push(installPreviewKeyboard(window, bus));
 
-  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
-  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 2 } } }));
-  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "activate" } }));
+  const repeatedEnter = new KeyboardEvent("keydown", {
+    key: "Enter",
+    repeat: true,
+    cancelable: true
+  });
+  window.dispatchEvent(repeatedEnter);
+
+  expect(repeatedEnter.defaultPrevented).toBe(false);
+  expect(shell.mode).toBe("grid");
+});
+
+it("enter_in_single_mode_focuses_the_notes_textarea_at_the_end", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  const fixture = previewFetchFixture(manifest, cssText, {
+    version: 1,
+    notes: { end: "abc" }
+  });
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 2 }));
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  cleanups.push(installPreviewKeyboard(window, bus));
+  const textarea = root.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="note"]'
+  )!;
+
+  textarea.setSelectionRange(1, 1);
+  const focusNotes = new KeyboardEvent("keydown", { key: "Enter", cancelable: true });
+  window.dispatchEvent(focusNotes);
+
+  expect(document.activeElement).toBe(textarea);
+  expect(shell.currentIndex).toBe(2);
+  expect(shell.selectedIndex).toBe(2);
+  expect(textarea.selectionStart).toBe(textarea.value.length);
+  expect(textarea.selectionEnd).toBe(textarea.value.length);
+  expect(focusNotes.defaultPrevented).toBe(true);
+
+  const repeatedFocusingEnter = new KeyboardEvent("keydown", {
+    key: "Enter",
+    repeat: true,
+    bubbles: true,
+    cancelable: true
+  });
+  textarea.dispatchEvent(repeatedFocusingEnter);
+
+  expect(repeatedFocusingEnter.defaultPrevented).toBe(true);
+
+  const enterInNotes = new KeyboardEvent("keydown", {
+    key: "Enter",
+    bubbles: true,
+    cancelable: true
+  });
+  textarea.dispatchEvent(enterInNotes);
+
+  expect(document.activeElement).toBe(textarea);
+  expect(shell.mode).toBe("single");
+  expect(enterInNotes.defaultPrevented).toBe(false);
+
+  const repeatedTypedEnter = new KeyboardEvent("keydown", {
+    key: "Enter",
+    repeat: true,
+    bubbles: true,
+    cancelable: true
+  });
+  textarea.dispatchEvent(repeatedTypedEnter);
+
+  expect(repeatedTypedEnter.defaultPrevented).toBe(false);
+
+  const blurNotes = new KeyboardEvent("keydown", {
+    key: "Escape",
+    bubbles: true,
+    cancelable: true
+  });
+  textarea.dispatchEvent(blurNotes);
+
+  expect(document.activeElement).not.toBe(textarea);
+  expect(shell.mode).toBe("single");
+
+  const enterGrid = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+  window.dispatchEvent(enterGrid);
+  await vi.waitFor(() => expect(shell.mode).toBe("grid"));
+
+  const activateSlide = new KeyboardEvent("keydown", { key: "Enter", cancelable: true });
+  window.dispatchEvent(activateSlide);
 
   expect(shell.mode).toBe("single");
   expect(shell.currentIndex).toBe(2);
   expect(shell.selectedIndex).toBe(2);
+  expect(document.activeElement).not.toBe(textarea);
+});
+
+it("enter_in_single_mode_focuses_an_empty_notes_textarea_at_zero", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  await mountForTest(root, bus);
+  cleanups.push(installPreviewKeyboard(window, bus));
+  const textarea = root.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="note"]'
+  )!;
+
+  const focusNotes = new KeyboardEvent("keydown", { key: "Enter", cancelable: true });
+  window.dispatchEvent(focusNotes);
+
+  expect(textarea.value).toBe("");
+  expect(document.activeElement).toBe(textarea);
+  expect(textarea.selectionStart).toBe(0);
+  expect(textarea.selectionEnd).toBe(0);
+});
+
+it("entering_grid_blurs_a_focused_textarea", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  const fixture = previewFetchFixture();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const textarea = root.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="note"]'
+  )!;
+
+  textarea.value = "dirty";
+  textarea.focus();
+  textarea.blur();
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "enter" } }));
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "activate" } }));
+  expect(document.activeElement).toBe(textarea);
+
+  fixture.resolveNotesPost(okJson({ saved: true }));
+
+  await vi.waitFor(() => {
+    expect(shell.mode).toBe("grid");
+    expect(document.activeElement).not.toBe(textarea);
+  });
 });
 
 it("grid arrow navigation moves selection and Enter shows the selected slide", async () => {
@@ -1732,7 +1906,7 @@ it("a_no_op_transition_does_not_cancel_a_pending_one", async () => {
   expect(shell.currentIndex).toBe(0);
 
   bus.dispatchEvent(
-    new CustomEvent("peitho:overviewrequest", { detail: { action: "activate" } })
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } })
   );
   root.querySelectorAll<HTMLElement>(".peitho-preview-thumb")[0].click();
   fixture.resolveNotesPost(okJson({ saved: true }));

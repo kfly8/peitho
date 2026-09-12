@@ -30,6 +30,16 @@ plaintext, read-only notes.
    grid mode; a second Escape does, provided the blur's save succeeded (a
    failed save keeps single mode with the error visible, per the transition
    gate). `o`, Enter, and the other shell shortcuts are inert while typing.
+   Added 2026-09-13 (Issue #500): Enter in single mode, outside the textarea,
+   focuses it with the caret at the end, so Enter/Escape are symmetric and a
+   full editing pass (grid → Enter → Enter → type → PageDown → Escape →
+   Escape) stays on the keyboard. The installer still emits `activate`
+   (gaining only the repeat and focused-link guards described under
+   Keyboard); the mode decision is shell-side, where `activateSelection`
+   decides that activation means "open the selected slide" in grid mode and
+   "focus the note" in single mode. The guard that swallows the focusing
+   Enter's auto-repeats is cleared on blur, so it is live only while that
+   Enter-driven focus is.
 3. **Write-back shape: one comment per slide.** Every note comment in the
    slide is removed and a single `<!-- ... -->` is written at the position
    of the first one. A slide with no note gets the comment appended at the
@@ -344,8 +354,15 @@ Escape cancels the conversion candidate and PageUp / PageDown belong to the
 candidate window, so neither the installer nor the textarea's own Escape
 handler acts on a composing key event. Shift+PageUp / Shift+PageDown inside
 an editable target are not navigation either; the browser extends the
-selection by a page. Auto-repeated Escape is ignored by the installer, so a
-held key blurs the textarea without also entering grid mode. PageUp /
+selection by a page. Auto-repeated Escape and Enter are ignored by the installer, so a
+held key blurs the textarea without also entering grid mode, and a held Enter
+in grid opens the slide once without also focusing the note. After Enter
+focuses the note (Issue #500), the shell's own textarea handler swallows the
+repeats of that same press, because they would otherwise land in the textarea
+as newlines and be autosaved; the first non-repeat key clears the guard.
+Entering grid blurs a focused textarea inside the commit, so a hidden
+textarea can never hold focus. Enter with keyboard focus on a link inside a
+slide is left to the browser (the link activates; nothing else happens). PageUp /
 PageDown from an editable target are `preventDefault`ed only when the shell
 accepted the navigation, so at the deck boundary the textarea keeps its own
 page scroll. Safari delivers the composition-ending Escape after

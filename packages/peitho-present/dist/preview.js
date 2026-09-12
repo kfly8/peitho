@@ -592,6 +592,9 @@ function installPreviewKeyboard(win = window, bus = win) {
       return;
     }
     if (event.key === "Enter") {
+      if (event.repeat) return;
+      const target = event.composedPath()[0];
+      if (target instanceof Element && target.closest("a") !== null) return;
       event.preventDefault();
       dispatchOverviewRequest(bus, "activate");
       return;
@@ -659,6 +662,7 @@ var PreviewShellController = class {
   notesStatus;
   notesPositionText;
   notesTextareaKey = null;
+  swallowEnterRepeat = false;
   flushChain = Promise.resolve(true);
   flushesInFlight = 0;
   transitionSequence = 0;
@@ -688,12 +692,18 @@ var PreviewShellController = class {
   };
   onResize = () => this.applyLayout();
   onNotesKeyDown = (event) => {
+    if (event.key === "Enter" && event.repeat && this.swallowEnterRepeat) {
+      event.preventDefault();
+      return;
+    }
+    if (!event.repeat) this.swallowEnterRepeat = false;
     if (isComposingKey(event)) return;
     if (hasChordModifier(event) || event.key !== "Escape") return;
     event.preventDefault();
     this.notesTextarea.blur();
   };
   onNotesBlur = () => {
+    this.swallowEnterRepeat = false;
     void this.flushNotes();
   };
   onPageHide = () => {
@@ -1061,7 +1071,14 @@ var PreviewShellController = class {
     this.commitTransition(this.selectedIndex, "single");
   }
   activateSelection() {
-    this.exitGrid();
+    if (this.mode === "grid") {
+      this.exitGrid();
+      return;
+    }
+    const length = this.notesTextarea.value.length;
+    this.notesTextarea.setSelectionRange(length, length);
+    this.notesTextarea.focus();
+    this.swallowEnterRepeat = true;
   }
   setIndex(index) {
     this.commitTransition(index, this.mode);
@@ -1076,6 +1093,9 @@ var PreviewShellController = class {
       this.currentIndex = index;
       this.selectedIndex = index;
       this.mode = mode;
+      if (mode === "grid" && this.doc.activeElement === this.notesTextarea) {
+        this.notesTextarea.blur();
+      }
       this.applyLayout();
       if (previousIndex !== index) this.dispatchSlideChange(previousIndex);
       this.saveState();
@@ -1322,8 +1342,8 @@ var PreviewShellController = class {
       if (draft.text !== void 0) this.notesTextarea.value = draft.text;
       const selectionStart = Math.min(draft.selectionStart, this.notesTextarea.value.length);
       const selectionEnd = Math.min(draft.selectionEnd, this.notesTextarea.value.length);
-      if (draft.focused && this.mode === "single") this.notesTextarea.focus();
       this.notesTextarea.setSelectionRange(selectionStart, selectionEnd);
+      if (draft.focused && this.mode === "single") this.notesTextarea.focus();
     }
     this.writeState({ mode: this.mode, index: this.stateIndex() });
   }

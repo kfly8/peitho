@@ -872,8 +872,8 @@ snapshot directly with `keepalive` rather than queuing behind the chain, and
 the keepalive size fallback counts encoded bytes. `isDirty(key, text)` and
 `stateIndex()` are the single sources shared by the flush path, the gate, and
 state save/restore. `commitTransition` returns early on a no-op (same index, selection, and
-mode) before bumping the sequence, so Enter or a click on the current
-thumbnail cannot cancel a pending gated navigation. Tests added:
+mode) before bumping the sequence, so a redundant `exit` request or a click
+on the current thumbnail cannot cancel a pending gated navigation. Tests added:
 `clean_draft_does_not_overwrite_freshly_loaded_notes`,
 `destroy_cancels_a_pending_transition_commit`,
 `transition_waits_for_every_queued_flush`,
@@ -945,7 +945,8 @@ detection reads `composedPath()[0]` rather than `event.target` so an editable
 inside a slide's shadow root is not retargeted to the host. Shift+PageUp /
 Shift+PageDown inside an editable target are left to the browser so they
 extend the selection by a page instead of navigating. The installer ignores
-auto-repeated Escape so a held key cannot blur and enter grid in one press.
+auto-repeated Escape so a held key cannot blur and enter grid in one press
+(extended to Enter by the Issue #500 follow-up below).
 Page keys from an editable target are `preventDefault`ed only when the shell
 accepted the request (boundary presses keep the textarea's own scroll), and
 `keyCode 229` counts as composing for Safari's post-`compositionend` Escape.
@@ -1081,6 +1082,27 @@ committed. `target/preview-notes-e2e/deck.md` contains:
 peitho preview examples/peitho-tour/deck.md
 peitho preview target/preview-notes-e2e/deck.md
 ```
+
+### Follow-up: Enter focuses the note (Issue #500, 2026-09-13)
+
+**Goal.** Close the keyboard-only loop: grid → Enter → Enter → type →
+PageDown → Escape → Escape.
+
+**Files.** `packages/peitho-present/src/preview.ts`, `test/preview.test.ts`,
+`dist/preview.js`, `README.md`, `site/content/guide/cli.md`, `CLAUDE.md`,
+`docs/specs/2026-09-12-preview-notes-edit-design.md`.
+
+**Implementation.** `activateSelection` branches on the mode: grid keeps
+opening the selected slide; single focuses the textarea with the caret at the
+end (author decision: caret at the end). The installer is unchanged except
+that Enter, like Escape, ignores auto-repeat, and Enter on a focused link is
+left to the browser. The textarea handler swallows the repeats of the
+focusing Enter so a held key does not type newlines; entering grid blurs a
+focused textarea inside `commitTransition`'s commit.
+
+**Tests.** `enter_in_single_mode_focuses_the_notes_textarea_at_the_end`,
+`enter_in_single_mode_focuses_an_empty_notes_textarea_at_zero`,
+`entering_grid_blurs_a_focused_textarea`, repeat-Enter and link-Enter cases.
 
 ## Summary
 
