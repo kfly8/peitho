@@ -3,6 +3,7 @@ import {
   installPreviewKeyboard,
   installPreviewReload,
   mountPreviewShell,
+  PREVIEW_NOTES_HEIGHT,
   previewGridColumnCount,
   type PreviewShell
 } from "../src/preview";
@@ -57,6 +58,7 @@ const manifest = {
   ]
 };
 
+const notes = { version: 1, notes: { middle: "Pause here.\nThen ask." } };
 const cssText = ".slot-title { color: red; }";
 const fontCssText = `
 @import url("fonts/noto-sans-jp/index.css");
@@ -101,6 +103,7 @@ function fetchForManifest(deck: typeof manifest, css = cssText): typeof fetch {
   return vi.fn(async (url: string) => {
     if (url === "/sync") return okJson({ seq: 0, message: null, generation: 0 });
     if (url === "manifest.json") return okJson(deck);
+    if (url === "notes.json") return okJson(notes);
     if (url === "peitho.css") return okText(css);
     if (url.startsWith("slides/")) return okText(`<section><h1>${url}</h1></section>`);
     return { ok: false, status: 404, text: async () => "not found" } as Response;
@@ -791,6 +794,7 @@ it("ignores preview commands while content is still loading without clobbering s
       });
     }
     if (url === "manifest.json") return Promise.resolve(okJson(manifest));
+    if (url === "notes.json") return Promise.resolve(okJson(notes));
     if (url === "peitho.css") return Promise.resolve(okText(cssText));
     if (url === "slides/000-intro.html") return Promise.resolve(okText("<section><h1>Intro</h1></section>"));
     if (url === "slides/001-middle.html") return Promise.resolve(okText("<section><h1>Middle</h1></section>"));
@@ -886,6 +890,7 @@ it("handshakes sync generation before fetching preview content", async () => {
     calls.push(url);
     if (url === "/sync") return okJson({ seq: 7, message: null, generation: 4 });
     if (url === "manifest.json") return okJson(manifest);
+    if (url === "notes.json") return okJson(notes);
     if (url === "peitho.css") return okText(cssText);
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-middle.html") return okText("<section><h1>Middle</h1></section>");
@@ -904,6 +909,7 @@ it("handshakes sync generation before fetching preview content", async () => {
 
   expect(calls[0]).toBe("/sync");
   expect(calls[1]).toBe("manifest.json");
+  expect(calls[2]).toBe("notes.json");
   expect(shell.generation).toBe(4);
 });
 
@@ -914,6 +920,7 @@ it("fetches preview slide fragments in parallel", async () => {
   const fetcher = vi.fn((url: string) => {
     if (url === "/sync") return Promise.resolve(okJson({ seq: 0, message: null, generation: 0 }));
     if (url === "manifest.json") return Promise.resolve(okJson(manifest));
+    if (url === "notes.json") return Promise.resolve(okJson(notes));
     if (url === "peitho.css") return Promise.resolve(okText(cssText));
     if (url.startsWith("slides/")) {
       requestedSlides.push(url);
@@ -968,4 +975,54 @@ it("generation changes save preview state before reloading", async () => {
     index: 1
   });
   expect(reload).toHaveBeenCalledTimes(1);
+});
+
+it("shows the current slide's speaker note below the slide in single mode", async () => {
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: standardFetch(),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const panel = root.querySelector<HTMLElement>('[data-peitho-preview="notes"]')!;
+  expect(panel.hidden).toBe(false);
+  expect(panel.textContent).toBe("No notes for this slide.");
+  expect(panel.classList.contains("is-empty")).toBe(true);
+
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  expect(panel.textContent).toBe("Pause here.\nThen ask.");
+  expect(panel.classList.contains("is-empty")).toBe(false);
+
+  // The slide is fitted above the panel: 1280x720 into 1280x(720-160).
+  const host = root.querySelector<HTMLElement>('[data-slide-key="middle"] .peitho-preview-slide')!;
+  const scale = (720 - PREVIEW_NOTES_HEIGHT) / 720;
+  expect(host.style.transform).toContain(`scale(${scale})`);
+});
+
+it("hides the speaker notes panel in grid mode", async () => {
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: standardFetch(),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const panel = root.querySelector<HTMLElement>('[data-peitho-preview="notes"]')!;
+  expect(shell.mode).toBe("grid");
+  expect(panel.hidden).toBe(true);
+
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
+  expect(panel.hidden).toBe(false);
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "enter" } }));
+  expect(panel.hidden).toBe(true);
 });

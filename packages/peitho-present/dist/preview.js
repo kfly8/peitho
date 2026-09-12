@@ -539,6 +539,8 @@ var DEFAULT_PREVIEW_MODE = "grid";
 var GRID_TILE_WIDTH = 320;
 var GRID_GAP = 18;
 var GRID_PADDING = 24;
+var PREVIEW_NOTES_HEIGHT = 160;
+var NO_NOTES_PLACEHOLDER = "No notes for this slide.";
 function previewGridColumnCount(rootWidth) {
   const columns = Math.floor(
     (rootWidth - GRID_PADDING * 2 + GRID_GAP) / (GRID_TILE_WIDTH + GRID_GAP)
@@ -631,6 +633,8 @@ var PreviewShellController = class {
   viewport;
   restoredState;
   slides = [];
+  notes = { version: 1, notes: {} };
+  notesPanel;
   tileClickGuardCleanups = [];
   fontScopeCleanup = null;
   dimensions = { width: 1280, height: 720 };
@@ -673,6 +677,7 @@ var PreviewShellController = class {
       this.root.style.position = "relative";
     }
     this.root.style.background = "#000";
+    this.notesPanel = this.createNotesPanel();
     this.bus.addEventListener("peitho:navigate", this.onNavigate);
     this.bus.addEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.win.addEventListener("resize", this.onResize);
@@ -681,6 +686,7 @@ var PreviewShellController = class {
     try {
       this.generation = await this.fetchGeneration();
       const manifest = await this.fetchJson("manifest.json");
+      this.notes = await this.fetchJson("notes.json");
       this.dimensions = {
         width: manifest.canvasWidth,
         height: manifest.canvasHeight
@@ -703,6 +709,7 @@ var PreviewShellController = class {
         this.root.appendChild(view.tile);
         this.slides.push(view);
       }
+      this.root.appendChild(this.notesPanel);
       const restored = this.restoredState;
       const restoredIndex = restored === null ? this.clampIndex(initialSlideIndex(pending.map((view) => view.meta)) ?? 0) : this.clampIndex(restored.index);
       this.currentIndex = restoredIndex;
@@ -790,6 +797,35 @@ var PreviewShellController = class {
     shadow.appendChild(template.content.cloneNode(true));
     tile.appendChild(host);
     return { meta: slide, tile, host };
+  }
+  createNotesPanel() {
+    const panel = this.doc.createElement("aside");
+    panel.classList.add("peitho-preview-notes");
+    panel.dataset.peithoPreview = "notes";
+    panel.setAttribute("aria-label", "Speaker notes");
+    panel.hidden = true;
+    const style = panel.style;
+    style.position = "absolute";
+    style.left = "0";
+    style.right = "0";
+    style.bottom = "0";
+    style.height = `${PREVIEW_NOTES_HEIGHT}px`;
+    style.boxSizing = "border-box";
+    style.overflow = "auto";
+    style.padding = "14px 24px";
+    style.borderTop = "1px solid rgba(255,255,255,0.16)";
+    style.background = "#15181e";
+    style.color = "#e5e7eb";
+    style.font = "18px/1.5 system-ui, sans-serif";
+    style.whiteSpace = "pre-wrap";
+    return panel;
+  }
+  renderNotes() {
+    const slide = this.slides[this.currentIndex];
+    const note = slide === void 0 ? void 0 : this.notes.notes[slide.meta.key];
+    this.notesPanel.textContent = note ?? NO_NOTES_PLACEHOLDER;
+    this.notesPanel.classList.toggle("is-empty", note == null);
+    this.notesPanel.style.opacity = note == null ? "0.5" : "1";
   }
   setCanvasRootProperties(dimensions, cssAspect) {
     this.root.style.setProperty("--peitho-canvas-width", `${dimensions.width}px`);
@@ -895,7 +931,13 @@ var PreviewShellController = class {
       width: this.win.innerWidth,
       height: this.win.innerHeight
     };
-    const fit = calculateCanvasFit(viewport, this.dimensions.width, this.dimensions.height);
+    const fit = calculateCanvasFit(
+      { width: viewport.width, height: Math.max(0, viewport.height - PREVIEW_NOTES_HEIGHT) },
+      this.dimensions.width,
+      this.dimensions.height
+    );
+    this.notesPanel.hidden = false;
+    this.renderNotes();
     this.root.style.display = "block";
     this.root.style.overflow = "hidden";
     this.root.style.padding = "0";
@@ -937,6 +979,7 @@ var PreviewShellController = class {
     this.root.style.setProperty("scroll-padding-top", `${GRID_PADDING}px`);
     this.root.style.setProperty("scroll-padding-bottom", `${GRID_PADDING}px`);
     this.root.style.boxSizing = "border-box";
+    this.notesPanel.hidden = true;
     this.slides.forEach((slide, index) => {
       const selected = index === this.selectedIndex;
       slide.tile.hidden = false;
@@ -1009,6 +1052,7 @@ var PreviewShellController = class {
   }
 };
 export {
+  PREVIEW_NOTES_HEIGHT,
   installPreviewKeyboard,
   installPreviewReload,
   mountPreviewShell,
