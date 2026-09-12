@@ -1035,6 +1035,7 @@ var PreviewShellController = class {
     textarea.style.minHeight = "0";
     textarea.style.width = "100%";
     textarea.style.padding = "0";
+    textarea.style.outlineOffset = "4px";
     panel.appendChild(textarea);
     return panel;
   }
