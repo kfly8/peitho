@@ -188,10 +188,16 @@ the deck itself.
 ### CLI: parse-for-notes and the writer
 
 `peitho_core` exposes `pub fn parse_deck(source, frontmatter, highlighter) ->
-Result<Deck<Parsed>>` (today `parse_markdown` is `pub(crate)` and only
+Result<UntransformedDeck>` (today `parse_markdown` is `pub(crate)` and only
 reachable through `parse_deck_and_transform`, which runs `code_images`
 renderers — external commands, Chrome, network — and must never run on a
-note save).
+note save). `UntransformedDeck` (revised 2026-09-13 during Task 4 review)
+wraps the parsed deck and exposes only `parsed_slides()` and `settings()`;
+it cannot enter mapping or rendering, so a deck whose declared renderers
+never ran is unrepresentable on the build path by type rather than by
+convention. `parse_deck` also skips transform-phase validation (embed URL
+and `mode=` rules, external-command failures), so a deck it accepts may
+still fail `peitho build`; the next watch rebuild reports that as usual.
 
 In `main.rs`, the preview command builds a `NotesWriter` closure and hands it
 to the server:
