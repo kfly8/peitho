@@ -27,8 +27,9 @@ plaintext, read-only notes.
    key are ordinary text editing. Only PageUp / PageDown navigate slides
    (flushing first; the textarea keeps focus so the author can keep typing
    on the next slide). Escape leaves the textarea (blur) and does not enter
-   grid mode; a second Escape does. `o`, Enter, and the other shell
-   shortcuts are inert while typing.
+   grid mode; a second Escape does, provided the blur's save succeeded (a
+   failed save keeps single mode with the error visible, per the transition
+   gate). `o`, Enter, and the other shell shortcuts are inert while typing.
 3. **Write-back shape: one comment per slide.** Every note comment in the
    slide is removed and a single `<!-- ... -->` is written at the position
    of the first one. A slide with no note gets the comment appended at the
@@ -330,11 +331,26 @@ so the shell can show them verbatim. The server never runs a rebuild itself.
 
 ### Keyboard (`installPreviewKeyboard`)
 
-When `event.target` is a `<textarea>` (or any editable element), the
-installer dispatches `peitho:navigate` only for PageUp / PageDown
-(`preventDefault`) and returns for every other key without touching the
-event, so text editing keys and Escape reach the textarea. All existing
-behavior outside the textarea is unchanged. `hasChordModifier` still applies.
+When the event's composed-path target (`composedPath()[0]`, so a control
+inside a slide's shadow root is not retargeted to its host) is a `<textarea>`,
+`<input>`, `<select>`, or contenteditable element, the installer dispatches
+`peitho:navigate` only for PageUp / PageDown (`preventDefault` when the shell
+accepted the request, see below) and returns for every other key without
+touching the event, so text editing keys and Escape reach the textarea. All
+existing behavior outside editable targets is unchanged apart from the two
+guards below. `hasChordModifier` still applies, and so does `isComposing`
+(revised 2026-09-13 in Task 9 review): while an IME composition is open,
+Escape cancels the conversion candidate and PageUp / PageDown belong to the
+candidate window, so neither the installer nor the textarea's own Escape
+handler acts on a composing key event. Shift+PageUp / Shift+PageDown inside
+an editable target are not navigation either; the browser extends the
+selection by a page. Auto-repeated Escape is ignored by the installer, so a
+held key blurs the textarea without also entering grid mode. PageUp /
+PageDown from an editable target are `preventDefault`ed only when the shell
+accepted the navigation, so at the deck boundary the textarea keeps its own
+page scroll. Safari delivers the composition-ending Escape after
+`compositionend` with `isComposing` false, so the guard also treats
+`keyCode 229` as composing.
 
 §16 holds: the keyboard module only emits request events; the blur, the
 flush, and the state transitions live in the preview shell.

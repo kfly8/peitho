@@ -937,6 +937,23 @@ the first press cannot dispatch `peitho:overviewrequest`; the next press after
 blur follows the existing shell shortcut and enters grid mode. Store this
 listener as `onNotesKeyDown` and remove it in `destroy`.
 
+**Revision (2026-09-13, PR for this task).** Review added an IME guard:
+both the window installer and the textarea's Escape handler return early when
+`event.isComposing` is true, because Chrome fires `keydown` during a Japanese
+conversion and a blur there would commit the candidate and flush it. Editable
+detection reads `composedPath()[0]` rather than `event.target` so an editable
+inside a slide's shadow root is not retargeted to the host. Shift+PageUp /
+Shift+PageDown inside an editable target are left to the browser so they
+extend the selection by a page instead of navigating. The installer ignores
+auto-repeated Escape so a held key cannot blur and enter grid in one press.
+Page keys from an editable target are `preventDefault`ed only when the shell
+accepted the request (boundary presses keep the textarea's own scroll), and
+`keyCode 229` counts as composing for Safari's post-`compositionend` Escape.
+The editable branch shares the navigate-dispatch path with the rest of the
+installer instead of duplicating it. Tests added:
+`composing_keys_are_ignored_in_the_notes_textarea` and
+`editable_page_navigation_is_prevented_only_when_accepted`.
+
 **Verification.**
 
 ```sh
