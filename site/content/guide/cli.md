@@ -39,8 +39,9 @@ peitho preview
 It watches the deck, its referenced images, and its assets, serves locally,
 and reloads while preserving the current slide and overview state. The
 single-slide view keeps a filmstrip of thumbnails on the left and shows the
-current slide's speaker notes in a panel below the slide, headed by the
-slide's position (`3 / 25`); the overview grid shows neither. Every thumbnail
+current slide's speaker notes in an editable panel below the slide, headed by
+the slide's position (`3 / 25`); the overview grid shows neither. See
+[Editing speaker notes in preview](#editing-speaker-notes-in-preview). Every thumbnail
 and grid tile carries its slide number in the bottom-left corner. These
 numbers are preview chrome only; a page number on the slide itself comes from
 the `page_numbers` frontmatter key.
@@ -53,6 +54,48 @@ should open a window:
 ```sh
 peitho preview --port 5173 --no-open
 ```
+
+### Editing speaker notes in preview
+
+The notes panel is an editable textarea. Type into it and the note is saved
+when the panel loses focus (click away), when you move to another slide, and
+when the page is reloaded or closed. While the textarea has focus, arrows,
+Home, End, and every other key edit text; only PageUp and PageDown still
+change slides (the note is saved first), and Esc leaves the textarea so that
+a second Esc enters the overview. A slide change (or entering the overview)
+waits for the save and is cancelled if it fails, so unsaved text is never left
+behind; the reason appears in red next to the position line and the text
+stays in the panel until a later save succeeds. A rebuild triggered by the
+save reloads the preview with the caret and focus where they were.
+
+What a save writes:
+
+- A slide without a note comment gets one appended after its last non-blank
+  line, separated by a blank line. A single-line note becomes `<!-- text -->`,
+  a multi-line note becomes `<!--` / text / `-->`.
+- If the slide's first note comment sits on its own line, not indented, it
+  is replaced in place. A first comment anywhere else (inline in a paragraph,
+  indented under a list item, or inside a blockquote) is removed and the note
+  is appended at the end of the slide instead.
+- Any further note comments in the slide are also removed, so several
+  note comments collapse into one after the first save. Where a removed
+  comment sat between two non-blank lines, a blank line (a bare `>` inside a
+  blockquote) is left in its place so the neighbours are never joined.
+- Leading and trailing whitespace is trimmed; an empty or whitespace-only
+  note removes the comment and inserts nothing. Saving the same text twice
+  leaves the file byte-identical.
+- A CRLF file stays CRLF.
+- A slide that comes from an `include` is written to the included file, not
+  to the deck that includes it.
+- Text containing `-->` cannot be represented in a comment, and text starting
+  with `{` would be read as page settings on the next build; both are
+  refused, and the textarea keeps the draft.
+- While the deck does not build (an edit in progress in your editor), a save
+  is refused and the reason is shown. The text stays in the panel, survives
+  the reload that the next successful build triggers, and is saved on the
+  next click-away or slide change.
+
+Edits go to the Markdown source only; notes never enter `dist/`.
 
 ## `peitho lint`
 
