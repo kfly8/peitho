@@ -638,6 +638,8 @@ var PreviewShellController = class {
   slides = [];
   notes = { version: 1, notes: {} };
   notesPanel;
+  notesPosition;
+  notesBody;
   strip;
   tileClickGuardCleanups = [];
   fontScopeCleanup = null;
@@ -682,6 +684,8 @@ var PreviewShellController = class {
     }
     this.root.style.background = "#000";
     this.notesPanel = this.createNotesPanel();
+    this.notesPosition = this.notesPanel.querySelector('[data-peitho-preview="position"]');
+    this.notesBody = this.notesPanel.querySelector('[data-peitho-preview="note"]');
     this.strip = this.createStrip();
     this.bus.addEventListener("peitho:navigate", this.onNavigate);
     this.bus.addEventListener("peitho:overviewrequest", this.onOverviewRequest);
@@ -793,6 +797,8 @@ var PreviewShellController = class {
     });
     const host = this.createSlideHost(slide, html, css, "peitho-preview-slide");
     tile.appendChild(host);
+    const tileNumber = this.createSlideNumber(slide);
+    tile.appendChild(tileNumber);
     const thumb = this.doc.createElement("div");
     thumb.classList.add("peitho-preview-thumb");
     thumb.dataset.slideKey = slide.key;
@@ -803,7 +809,26 @@ var PreviewShellController = class {
     const thumbHost = this.createSlideHost(slide, html, css, "peitho-preview-thumb-slide");
     thumbHost.style.pointerEvents = "none";
     thumb.appendChild(thumbHost);
-    return { meta: slide, tile, host, thumb, thumbHost };
+    thumb.appendChild(this.createSlideNumber(slide));
+    return { meta: slide, tile, host, thumb, thumbHost, tileNumber };
+  }
+  createSlideNumber(slide) {
+    const badge = this.doc.createElement("span");
+    badge.classList.add("peitho-preview-number");
+    badge.textContent = String(slide.index + 1);
+    const style = badge.style;
+    style.position = "absolute";
+    style.left = "6px";
+    style.bottom = "6px";
+    style.zIndex = "1";
+    style.padding = "1px 7px";
+    style.borderRadius = "4px";
+    style.background = "rgba(0,0,0,0.65)";
+    style.color = "#fff";
+    style.font = "600 12px/1.5 system-ui, sans-serif";
+    style.fontVariantNumeric = "tabular-nums";
+    style.pointerEvents = "none";
+    return badge;
   }
   createSlideHost(slide, html, css, className) {
     const host = this.doc.createElement("section");
@@ -861,15 +886,26 @@ var PreviewShellController = class {
     style.background = "#15181e";
     style.color = "#e5e7eb";
     style.font = "18px/1.5 system-ui, sans-serif";
-    style.whiteSpace = "pre-wrap";
+    const position = this.doc.createElement("div");
+    position.dataset.peithoPreview = "position";
+    position.style.font = "600 13px/1.5 system-ui, sans-serif";
+    position.style.color = "#9ca3af";
+    position.style.fontVariantNumeric = "tabular-nums";
+    position.style.marginBottom = "4px";
+    panel.appendChild(position);
+    const body = this.doc.createElement("div");
+    body.dataset.peithoPreview = "note";
+    body.style.whiteSpace = "pre-wrap";
+    panel.appendChild(body);
     return panel;
   }
   renderNotes() {
     const slide = this.slides[this.currentIndex];
     const note = slide === void 0 ? void 0 : this.notes.notes[slide.meta.key];
-    this.notesPanel.textContent = note ?? NO_NOTES_PLACEHOLDER;
+    this.notesPosition.textContent = `${this.currentIndex + 1} / ${this.slides.length}`;
+    this.notesBody.textContent = note ?? NO_NOTES_PLACEHOLDER;
     this.notesPanel.classList.toggle("is-empty", note == null);
-    this.notesPanel.style.opacity = note == null ? "0.5" : "1";
+    this.notesBody.style.opacity = note == null ? "0.5" : "1";
   }
   setCanvasRootProperties(dimensions, cssAspect) {
     this.root.style.setProperty("--peitho-canvas-width", `${dimensions.width}px`);
@@ -1017,6 +1053,7 @@ var PreviewShellController = class {
       slide.tile.style.outlineOffset = "";
       slide.tile.style.background = "transparent";
       slide.host.hidden = !active;
+      slide.tileNumber.hidden = true;
       this.applyHostFrame(slide.host, fit.left, fit.top, fit.scale);
       slide.thumb.classList.toggle("is-selected", active);
       slide.thumb.setAttribute("aria-current", active ? "true" : "false");
@@ -1070,6 +1107,7 @@ var PreviewShellController = class {
       slide.tile.style.outlineOffset = selected ? "1px" : "";
       slide.tile.style.background = "#000";
       slide.tile.style.cursor = "pointer";
+      slide.tileNumber.hidden = false;
       slide.tile.style.boxSizing = "content-box";
       slide.host.hidden = false;
       this.applyHostFrame(slide.host, 0, 0, scale);
