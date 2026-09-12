@@ -229,12 +229,23 @@ Mirrors `POST /rehearsal`: the endpoint exists on `PresentServer`, and
 whether it does anything is decided in one place. `PresentServer::
 with_notes_writer(NotesWriter)` is called only by `peitho preview`.
 
-Request body: `{"key": "<slide key>", "text": "<note>"}`.
+Request body: `{"key": "<slide key>", "text": "<note>"}`, sent with
+`Content-Type: application/json`. The server requires that media type
+(revised 2026-09-13 during Task 5 review): a `text/plain` body would be a
+CORS "simple request" that any page the author has open could fire at
+`127.0.0.1:<port>` without a preflight, whereas a JSON content type forces a
+preflight that the server answers with 405. `key` deserializes as a
+`SlideKey`, so malformed keys are rejected before any deck work. The server
+holds a lock around the writer call, so saves are serialized by construction
+rather than by a convention inside the writer. `write_atomic` follows an
+existing symlink to its canonical target, keeps the target's permissions, and
+removes its staging file when the rename fails, so a symlinked or 0600 deck
+survives a save unchanged in shape.
 
 | Outcome | Status | Body |
 | --- | --- | --- |
 | saved | 200 | `{"saved":true}` |
-| invalid JSON / missing fields / unknown fields | 400 | text |
+| invalid JSON / missing fields / unknown fields / malformed key / wrong content type | 400 | text |
 | no writer (present, or any non-preview server) | 404 | text |
 | deck does not parse, key not found, span not editable | 409 | `{"error":"<message>"}` |
 | text not representable (`-->`, leading `{`) | 422 | `{"error":"<message>"}` |
