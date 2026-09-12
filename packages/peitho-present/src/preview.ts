@@ -50,6 +50,7 @@ type PreviewSlideView = {
   host: HTMLElement;
   thumb: HTMLElement;
   thumbHost: HTMLElement;
+  tileNumber: HTMLElement;
 };
 
 type CanvasDimensions = {
@@ -180,6 +181,8 @@ class PreviewShellController implements PreviewShell {
   private readonly slides: PreviewSlideView[] = [];
   private notes: Notes = { version: 1, notes: {} };
   private readonly notesPanel: HTMLElement;
+  private readonly notesPosition: HTMLElement;
+  private readonly notesBody: HTMLElement;
   private readonly strip: HTMLElement;
   private readonly tileClickGuardCleanups: Array<() => void> = [];
   private fontScopeCleanup: (() => void) | null = null;
@@ -225,6 +228,8 @@ class PreviewShellController implements PreviewShell {
     }
     this.root.style.background = "#000";
     this.notesPanel = this.createNotesPanel();
+    this.notesPosition = this.notesPanel.querySelector('[data-peitho-preview="position"]')!;
+    this.notesBody = this.notesPanel.querySelector('[data-peitho-preview="note"]')!;
     this.strip = this.createStrip();
     this.bus.addEventListener("peitho:navigate", this.onNavigate);
     this.bus.addEventListener("peitho:overviewrequest", this.onOverviewRequest);
@@ -350,6 +355,8 @@ class PreviewShellController implements PreviewShell {
 
     const host = this.createSlideHost(slide, html, css, "peitho-preview-slide");
     tile.appendChild(host);
+    const tileNumber = this.createSlideNumber(slide);
+    tile.appendChild(tileNumber);
 
     const thumb = this.doc.createElement("div");
     thumb.classList.add("peitho-preview-thumb");
@@ -361,7 +368,27 @@ class PreviewShellController implements PreviewShell {
     const thumbHost = this.createSlideHost(slide, html, css, "peitho-preview-thumb-slide");
     thumbHost.style.pointerEvents = "none";
     thumb.appendChild(thumbHost);
-    return { meta: slide, tile, host, thumb, thumbHost };
+    thumb.appendChild(this.createSlideNumber(slide));
+    return { meta: slide, tile, host, thumb, thumbHost, tileNumber };
+  }
+
+  private createSlideNumber(slide: ManifestSlide): HTMLElement {
+    const badge = this.doc.createElement("span");
+    badge.classList.add("peitho-preview-number");
+    badge.textContent = String(slide.index + 1);
+    const style = badge.style;
+    style.position = "absolute";
+    style.left = "6px";
+    style.bottom = "6px";
+    style.zIndex = "1";
+    style.padding = "1px 7px";
+    style.borderRadius = "4px";
+    style.background = "rgba(0,0,0,0.65)";
+    style.color = "#fff";
+    style.font = "600 12px/1.5 system-ui, sans-serif";
+    style.fontVariantNumeric = "tabular-nums";
+    style.pointerEvents = "none";
+    return badge;
   }
 
   private createSlideHost(
@@ -427,16 +454,27 @@ class PreviewShellController implements PreviewShell {
     style.background = "#15181e";
     style.color = "#e5e7eb";
     style.font = "18px/1.5 system-ui, sans-serif";
-    style.whiteSpace = "pre-wrap";
+    const position = this.doc.createElement("div");
+    position.dataset.peithoPreview = "position";
+    position.style.font = "600 13px/1.5 system-ui, sans-serif";
+    position.style.color = "#9ca3af";
+    position.style.fontVariantNumeric = "tabular-nums";
+    position.style.marginBottom = "4px";
+    panel.appendChild(position);
+    const body = this.doc.createElement("div");
+    body.dataset.peithoPreview = "note";
+    body.style.whiteSpace = "pre-wrap";
+    panel.appendChild(body);
     return panel;
   }
 
   private renderNotes(): void {
     const slide = this.slides[this.currentIndex];
     const note = slide === undefined ? undefined : this.notes.notes[slide.meta.key];
-    this.notesPanel.textContent = note ?? NO_NOTES_PLACEHOLDER;
+    this.notesPosition.textContent = `${this.currentIndex + 1} / ${this.slides.length}`;
+    this.notesBody.textContent = note ?? NO_NOTES_PLACEHOLDER;
     this.notesPanel.classList.toggle("is-empty", note == null);
-    this.notesPanel.style.opacity = note == null ? "0.5" : "1";
+    this.notesBody.style.opacity = note == null ? "0.5" : "1";
   }
 
   private setCanvasRootProperties(dimensions: CanvasDimensions, cssAspect: string): void {
@@ -601,6 +639,7 @@ class PreviewShellController implements PreviewShell {
       slide.tile.style.outlineOffset = "";
       slide.tile.style.background = "transparent";
       slide.host.hidden = !active;
+      slide.tileNumber.hidden = true;
       this.applyHostFrame(slide.host, fit.left, fit.top, fit.scale);
 
       slide.thumb.classList.toggle("is-selected", active);
@@ -658,6 +697,7 @@ class PreviewShellController implements PreviewShell {
       slide.tile.style.outlineOffset = selected ? "1px" : "";
       slide.tile.style.background = "#000";
       slide.tile.style.cursor = "pointer";
+      slide.tileNumber.hidden = false;
       slide.tile.style.boxSizing = "content-box";
       slide.host.hidden = false;
       this.applyHostFrame(slide.host, 0, 0, scale);

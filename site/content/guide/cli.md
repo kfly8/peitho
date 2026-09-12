@@ -39,8 +39,11 @@ peitho preview
 It watches the deck, its referenced images, and its assets, serves locally,
 and reloads while preserving the current slide and overview state. The
 single-slide view keeps a filmstrip of thumbnails on the left and shows the
-current slide's speaker notes in a panel below the slide; the overview grid
-shows neither.
+current slide's speaker notes in a panel below the slide, headed by the
+slide's position (`3 / 25`); the overview grid shows neither. Every thumbnail
+and grid tile carries its slide number in the bottom-left corner. These
+numbers are preview chrome only; a page number on the slide itself comes from
+the `page_numbers` frontmatter key.
 
 `--port <PORT>` pins the server port, which is otherwise an ephemeral port
 chosen at startup. `--no-open` starts the server without launching a browser —

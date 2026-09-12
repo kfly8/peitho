@@ -962,12 +962,16 @@ it("shows the current slide's speaker note below the slide in single mode", asyn
   });
   shells.push(shell);
   const panel = root.querySelector<HTMLElement>('[data-peitho-preview="notes"]')!;
+  const position = panel.querySelector<HTMLElement>('[data-peitho-preview="position"]')!;
+  const note = panel.querySelector<HTMLElement>('[data-peitho-preview="note"]')!;
   expect(panel.hidden).toBe(false);
-  expect(panel.textContent).toBe("No notes for this slide.");
+  expect(position.textContent).toBe("1 / 3");
+  expect(note.textContent).toBe("No notes for this slide.");
   expect(panel.classList.contains("is-empty")).toBe(true);
 
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
-  expect(panel.textContent).toBe("Pause here.\nThen ask.");
+  expect(position.textContent).toBe("2 / 3");
+  expect(note.textContent).toBe("Pause here.\nThen ask.");
   expect(panel.classList.contains("is-empty")).toBe(false);
 
   // The slide is fitted above the panel: 1280x720 into 1280x(720-160).
@@ -1044,6 +1048,31 @@ it("shows a filmstrip of every slide beside the stage in single mode", async () 
     false,
     true
   ]);
+});
+
+it("numbers every thumbnail and grid tile, and hides the stage number in single mode", async () => {
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: standardFetch(),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const numbersIn = (selector: string) =>
+    Array.from(root.querySelectorAll<HTMLElement>(`${selector} .peitho-preview-number`));
+  expect(shell.mode).toBe("grid");
+  expect(numbersIn(".peitho-preview-tile").map((n) => n.textContent)).toEqual(["1", "2", "3"]);
+  expect(numbersIn(".peitho-preview-tile").every((n) => !n.hidden)).toBe(true);
+
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
+  expect(numbersIn(".peitho-preview-thumb").map((n) => n.textContent)).toEqual(["1", "2", "3"]);
+  expect(numbersIn(".peitho-preview-tile").every((n) => n.hidden)).toBe(true);
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "enter" } }));
+  expect(numbersIn(".peitho-preview-tile").every((n) => !n.hidden)).toBe(true);
 });
 
 it("hides the filmstrip in grid mode", async () => {
