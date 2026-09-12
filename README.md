@@ -75,7 +75,7 @@ enum Phase { Parsed, Mapped, Checked, Rendered }
 
 ![peitho preview prints the URL it is serving on, plus a rebuild line on every save](site/static/guide-shots/cli-preview.png)
 
-Press `o` to flip between the single-slide view and a tile overview of the whole deck, or move one way at a time: `Esc` returns to the overview, `Enter` opens the selected tile. Arrows walk the grid, and clicking a tile opens it too. The single-slide view shows the current slide's speaker notes in a panel below the slide, so a note can be checked without starting a presentation:
+Press `o` to flip between the single-slide view and a tile overview of the whole deck, or move one way at a time: `Esc` returns to the overview, `Enter` opens the selected tile. Arrows walk the grid, and clicking a tile opens it too. The single-slide view keeps a filmstrip of every slide on the left (click a thumbnail to jump to it) and shows the current slide's speaker notes in a panel below the slide, so a note can be checked without starting a presentation:
 
 ![The preview overview: every slide as a tile in a scrollable grid](site/static/guide-shots/preview-overview.png)
 

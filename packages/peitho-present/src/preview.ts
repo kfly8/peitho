@@ -48,6 +48,8 @@ type PreviewSlideView = {
   meta: ManifestSlide;
   tile: HTMLElement;
   host: HTMLElement;
+  thumb: HTMLElement;
+  thumbHost: HTMLElement;
 };
 
 type CanvasDimensions = {
@@ -66,6 +68,9 @@ const GRID_TILE_WIDTH = 320;
 const GRID_GAP = 18;
 const GRID_PADDING = 24;
 export const PREVIEW_NOTES_HEIGHT = 160;
+export const PREVIEW_STRIP_WIDTH = 200;
+const STRIP_PADDING = 12;
+const STRIP_GAP = 10;
 const NO_NOTES_PLACEHOLDER = "No notes for this slide.";
 
 export function previewGridColumnCount(rootWidth: number): number {
@@ -175,6 +180,7 @@ class PreviewShellController implements PreviewShell {
   private readonly slides: PreviewSlideView[] = [];
   private notes: Notes = { version: 1, notes: {} };
   private readonly notesPanel: HTMLElement;
+  private readonly strip: HTMLElement;
   private readonly tileClickGuardCleanups: Array<() => void> = [];
   private fontScopeCleanup: (() => void) | null = null;
   private dimensions: CanvasDimensions = { width: 1280, height: 720 };
@@ -219,6 +225,7 @@ class PreviewShellController implements PreviewShell {
     }
     this.root.style.background = "#000";
     this.notesPanel = this.createNotesPanel();
+    this.strip = this.createStrip();
     this.bus.addEventListener("peitho:navigate", this.onNavigate);
     this.bus.addEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.win.addEventListener("resize", this.onResize);
@@ -247,11 +254,14 @@ class PreviewShellController implements PreviewShell {
       this.manifest = manifest;
       this.doc.title = manifest.title;
       this.root.replaceChildren();
+      this.strip.replaceChildren();
       for (const view of pending) {
         this.root.appendChild(view.tile);
+        this.strip.appendChild(view.thumb);
         this.slides.push(view);
       }
       this.root.appendChild(this.notesPanel);
+      this.root.appendChild(this.strip);
       const restored = this.restoredState;
       const restoredIndex =
         restored === null
@@ -338,8 +348,30 @@ class PreviewShellController implements PreviewShell {
       this.exitGrid();
     });
 
+    const host = this.createSlideHost(slide, html, css, "peitho-preview-slide");
+    tile.appendChild(host);
+
+    const thumb = this.doc.createElement("div");
+    thumb.classList.add("peitho-preview-thumb");
+    thumb.dataset.slideKey = slide.key;
+    thumb.dataset.slideIndex = String(slide.index);
+    thumb.setAttribute("role", "button");
+    thumb.setAttribute("aria-label", `Slide ${slide.index + 1}`);
+    thumb.addEventListener("click", () => this.setIndex(slide.index));
+    const thumbHost = this.createSlideHost(slide, html, css, "peitho-preview-thumb-slide");
+    thumbHost.style.pointerEvents = "none";
+    thumb.appendChild(thumbHost);
+    return { meta: slide, tile, host, thumb, thumbHost };
+  }
+
+  private createSlideHost(
+    slide: ManifestSlide,
+    html: string,
+    css: string,
+    className: string
+  ): HTMLElement {
     const host = this.doc.createElement("section");
-    host.classList.add("peitho-preview-slide");
+    host.classList.add(className);
     host.dataset.slideKey = slide.key;
     host.dataset.slideIndex = String(slide.index);
     host.dataset.peithoCanvas = "slide";
@@ -350,8 +382,30 @@ class PreviewShellController implements PreviewShell {
     const template = this.doc.createElement("template");
     template.innerHTML = html;
     shadow.appendChild(template.content.cloneNode(true));
-    tile.appendChild(host);
-    return { meta: slide, tile, host };
+    return host;
+  }
+
+  private createStrip(): HTMLElement {
+    const strip = this.doc.createElement("nav");
+    strip.classList.add("peitho-preview-strip");
+    strip.dataset.peithoPreview = "strip";
+    strip.setAttribute("aria-label", "Slides");
+    strip.hidden = true;
+    const style = strip.style;
+    style.position = "absolute";
+    style.left = "0";
+    style.top = "0";
+    style.bottom = "0";
+    style.width = `${PREVIEW_STRIP_WIDTH}px`;
+    style.boxSizing = "border-box";
+    style.overflowY = "auto";
+    style.padding = `${STRIP_PADDING}px`;
+    style.scrollPadding = `${STRIP_PADDING}px`;
+    style.flexDirection = "column";
+    style.gap = `${STRIP_GAP}px`;
+    style.borderRight = "1px solid rgba(255,255,255,0.16)";
+    style.background = "#15181e";
+    return strip;
   }
 
   private createNotesPanel(): HTMLElement {
@@ -362,7 +416,7 @@ class PreviewShellController implements PreviewShell {
     panel.hidden = true;
     const style = panel.style;
     style.position = "absolute";
-    style.left = "0";
+    style.left = `${PREVIEW_STRIP_WIDTH}px`;
     style.right = "0";
     style.bottom = "0";
     style.height = `${PREVIEW_NOTES_HEIGHT}px`;
@@ -504,11 +558,20 @@ class PreviewShellController implements PreviewShell {
       height: this.win.innerHeight
     };
     const fit = calculateCanvasFit(
-      { width: viewport.width, height: Math.max(0, viewport.height - PREVIEW_NOTES_HEIGHT) },
+      {
+        width: Math.max(0, viewport.width - PREVIEW_STRIP_WIDTH),
+        height: Math.max(0, viewport.height - PREVIEW_NOTES_HEIGHT)
+      },
       this.dimensions.width,
       this.dimensions.height
     );
+    const thumbWidth = PREVIEW_STRIP_WIDTH - STRIP_PADDING * 2 - 2;
+    const thumbScale = thumbWidth / this.dimensions.width;
+    const thumbHeight = this.dimensions.height * thumbScale;
     this.notesPanel.hidden = false;
+    this.strip.hidden = false;
+    // An inline display would override the hidden attribute, so it is set only while shown.
+    this.strip.style.display = "flex";
     this.renderNotes();
     this.root.style.display = "block";
     this.root.style.overflow = "hidden";
@@ -523,9 +586,9 @@ class PreviewShellController implements PreviewShell {
       slide.tile.hidden = !active;
       slide.tile.classList.toggle("is-selected", active);
       slide.tile.style.position = "absolute";
-      slide.tile.style.left = "0";
+      slide.tile.style.left = `${PREVIEW_STRIP_WIDTH}px`;
       slide.tile.style.top = "0";
-      slide.tile.style.width = "100%";
+      slide.tile.style.width = `calc(100% - ${PREVIEW_STRIP_WIDTH}px)`;
       slide.tile.style.height = "100%";
       slide.tile.style.overflow = "hidden";
       slide.tile.style.border = "0";
@@ -537,7 +600,23 @@ class PreviewShellController implements PreviewShell {
       slide.tile.style.background = "transparent";
       slide.host.hidden = !active;
       this.applyHostFrame(slide.host, fit.left, fit.top, fit.scale);
+
+      slide.thumb.classList.toggle("is-selected", active);
+      slide.thumb.setAttribute("aria-current", active ? "true" : "false");
+      slide.thumb.style.position = "relative";
+      slide.thumb.style.flexShrink = "0";
+      slide.thumb.style.width = `${thumbWidth}px`;
+      slide.thumb.style.height = `${thumbHeight}px`;
+      slide.thumb.style.overflow = "hidden";
+      slide.thumb.style.border = "1px solid rgba(255,255,255,0.24)";
+      slide.thumb.style.borderRadius = "4px";
+      slide.thumb.style.outline = active ? "3px solid #7dd3fc" : "";
+      slide.thumb.style.outlineOffset = active ? "1px" : "";
+      slide.thumb.style.background = "#000";
+      slide.thumb.style.cursor = "pointer";
+      this.applyHostFrame(slide.thumbHost, 0, 0, thumbScale);
     });
+    this.slides[this.currentIndex]?.thumb.scrollIntoView?.({ block: "nearest" });
   }
 
   private applyGridLayout(): void {
@@ -555,6 +634,8 @@ class PreviewShellController implements PreviewShell {
     this.root.style.setProperty("scroll-padding-bottom", `${GRID_PADDING}px`);
     this.root.style.boxSizing = "border-box";
     this.notesPanel.hidden = true;
+    this.strip.hidden = true;
+    this.strip.style.display = "";
 
     this.slides.forEach((slide, index) => {
       const selected = index === this.selectedIndex;

@@ -38,8 +38,9 @@ peitho preview
 
 It watches the deck, its referenced images, and its assets, serves locally,
 and reloads while preserving the current slide and overview state. The
-single-slide view shows the current slide's speaker notes in a panel below
-the slide; the overview grid does not.
+single-slide view keeps a filmstrip of thumbnails on the left and shows the
+current slide's speaker notes in a panel below the slide; the overview grid
+shows neither.
 
 `--port <PORT>` pins the server port, which is otherwise an ephemeral port
 chosen at startup. `--no-open` starts the server without launching a browser —
