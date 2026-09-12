@@ -4401,13 +4401,7 @@ fn emit_present_cache(
     write_shared_assets(cache, artifacts)?;
     write_slide_fragments(cache, &artifacts.rendered)?;
     fs::write(cache.join("manifest.json"), &artifacts.manifest_json).into_diagnostic()?;
-    fs::write(
-        cache.join("notes.json"),
-        core(peitho_core::notes_json(&peitho_core::Notes::from_slides(
-            artifacts.rendered.slides(),
-        )))?,
-    )
-    .into_diagnostic()?;
+    write_notes_json(cache, artifacts)?;
     fs::write(
         cache.join("present.json"),
         core(peitho_core::present_config_json(
@@ -4448,6 +4442,16 @@ fn emit_present_cache(
     Ok(())
 }
 
+fn write_notes_json(dir: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
+    fs::write(
+        dir.join("notes.json"),
+        core(peitho_core::notes_json(&peitho_core::Notes::from_slides(
+            artifacts.rendered.slides(),
+        )))?,
+    )
+    .into_diagnostic()
+}
+
 fn emit_preview_cache_generation(
     cache: &Path,
     generation: u64,
@@ -4466,6 +4470,7 @@ fn emit_preview_cache_generation(
         &artifacts.manifest_json,
     )
     .into_diagnostic()?;
+    write_notes_json(&generation_dir, artifacts)?;
     fs::write(
         generation_dir.join("index.html"),
         peitho_core::render_preview_index(
@@ -9461,7 +9466,9 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         assert!(generation_dir.join("peitho.css").is_file());
         assert!(generation_dir.join("manifest.json").is_file());
         assert!(generation_dir.join("slides/000-intro.html").is_file());
-        assert!(!generation_dir.join("notes.json").exists());
+        assert!(fs::read_to_string(generation_dir.join("notes.json"))
+            .unwrap()
+            .contains("speaker note"));
         assert!(!generation_dir.join("present.html").exists());
         assert!(!generation_dir.join("presenter.html").exists());
         assert!(!generation_dir.join("present.json").exists());
