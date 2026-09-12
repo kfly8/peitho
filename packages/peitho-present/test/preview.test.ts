@@ -8,6 +8,7 @@ import {
   previewGridColumnCount,
   type PreviewShell
 } from "../src/preview";
+import type { Notes } from "../../../bindings/Notes";
 import type { SyncChannel } from "../src/sync";
 
 function okJson(value: unknown): Response {
@@ -100,15 +101,60 @@ function manifestWithSlides(slides: Array<{ key: string; skip?: boolean }>): typ
   };
 }
 
-function fetchForManifest(deck: typeof manifest, css = cssText): typeof fetch {
-  return vi.fn(async (url: string) => {
+type PreviewFetchFixture = {
+  fetcher: typeof fetch;
+  notes: Notes;
+  notesPosts(): Array<[string, RequestInit]>;
+  resolveNotesPost(response: Response): void;
+  rejectNotesPost(error: unknown): void;
+};
+
+function previewFetchFixture(
+  deck: typeof manifest = manifest,
+  css = cssText,
+  sourceNotes: Notes = notes
+): PreviewFetchFixture {
+  // The shell receives this same object from notes.json, so map assertions observe its updates.
+  const loadedNotes: Notes = { version: sourceNotes.version, notes: { ...sourceNotes.notes } };
+  const posts: Array<[string, RequestInit]> = [];
+  const notesPostSettlers: Array<{
+    resolve(response: Response): void;
+    reject(error: unknown): void;
+  }> = [];
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "/notes") {
+      posts.push([url, init ?? {}]);
+      return new Promise<Response>((resolve, reject) =>
+        notesPostSettlers.push({ resolve, reject })
+      );
+    }
     if (url === "/sync") return okJson({ seq: 0, message: null, generation: 0 });
     if (url === "manifest.json") return okJson(deck);
-    if (url === "notes.json") return okJson(notes);
+    if (url === "notes.json") return okJson(loadedNotes);
     if (url === "peitho.css") return okText(css);
     if (url.startsWith("slides/")) return okText(`<section><h1>${url}</h1></section>`);
     return { ok: false, status: 404, text: async () => "not found" } as Response;
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
+  return {
+    fetcher,
+    notes: loadedNotes,
+    notesPosts: () => posts,
+    resolveNotesPost(response: Response): void {
+      const settler = notesPostSettlers.shift();
+      if (settler === undefined) throw new Error("No pending /notes request");
+      settler.resolve(response);
+    },
+    rejectNotesPost(error: unknown): void {
+      const settler = notesPostSettlers.shift();
+      if (settler === undefined) throw new Error("No pending /notes request");
+      settler.reject(error);
+    }
+  };
+}
+
+function fetchForManifest(deck: typeof manifest, css = cssText): typeof fetch {
+  return previewFetchFixture(deck, css).fetcher;
 }
 
 function standardFetch(): typeof fetch {
@@ -948,7 +994,7 @@ it("generation changes save preview state before reloading", async () => {
   expect(reload).toHaveBeenCalledTimes(1);
 });
 
-it("shows the current slide's speaker note below the slide in single mode", async () => {
+it("renders_an_editable_notes_textarea_with_placeholder_and_status", async () => {
   const root = document.createElement("main");
   const bus = new EventTarget();
   sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
@@ -962,22 +1008,261 @@ it("shows the current slide's speaker note below the slide in single mode", asyn
   });
   shells.push(shell);
   const panel = root.querySelector<HTMLElement>('[data-peitho-preview="notes"]')!;
-  const position = panel.querySelector<HTMLElement>('[data-peitho-preview="position"]')!;
-  const note = panel.querySelector<HTMLElement>('[data-peitho-preview="note"]')!;
+  const position = panel.querySelector<HTMLSpanElement>('[data-peitho-preview="position"]')!;
+  const status = panel.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+  const note = panel.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
   expect(panel.hidden).toBe(false);
+  expect(panel.style.display).toBe("flex");
+  expect(panel.style.flexDirection).toBe("column");
+  expect(position).toBeInstanceOf(HTMLSpanElement);
   expect(position.textContent).toBe("1 / 3");
-  expect(note.textContent).toBe("No notes for this slide.");
-  expect(panel.classList.contains("is-empty")).toBe(true);
+  expect(position.style.flexShrink).toBe("0");
+  expect(status).toBeInstanceOf(HTMLSpanElement);
+  expect(status.textContent).toBe("");
+  expect(status.style.marginLeft).toBe("auto");
+  expect(status.style.whiteSpace).toBe("pre-wrap");
+  expect(status.style.overflowWrap).toBe("anywhere");
+  expect(position.parentElement?.style.display).toBe("flex");
+  expect(note).toBeInstanceOf(HTMLTextAreaElement);
+  expect(note.getAttribute("aria-label")).toBe("Speaker notes");
+  expect(note.placeholder).toBe("No notes for this slide.");
+  expect(note.value).toBe("");
+  expect(note.style.background).toBe("transparent");
+  expect(note.style.color).toBe("inherit");
+  expect(note.style.font).toBe("inherit");
+  expect(note.style.borderStyle).toBe("none");
+  expect(note.style.resize).toBe("none");
+  expect(note.style.flex).toBe("1 1 0%");
+  expect(note.style.minHeight).toBe("0px");
+  expect(note.style.width).toBe("100%");
+  expect(note.style.padding).toBe("0px");
 
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
   expect(position.textContent).toBe("2 / 3");
-  expect(note.textContent).toBe("Pause here.\nThen ask.");
-  expect(panel.classList.contains("is-empty")).toBe(false);
+  expect(root.querySelector('[data-peitho-preview="note"]')).toBe(note);
+  expect(note.value).toBe("Pause here.\nThen ask.");
 
   // The slide is fitted above the panel: 1280x720 into 1280x(720-160).
   const host = root.querySelector<HTMLElement>('[data-slide-key="middle"] .peitho-preview-slide')!;
   const scale = (720 - PREVIEW_NOTES_HEIGHT) / 720;
   expect(host.style.transform).toContain(`scale(${scale})`);
+});
+
+it("flushes_only_dirty_notes_on_blur", async () => {
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  const fixture = previewFetchFixture();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+
+  note.dispatchEvent(new Event("blur"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(fixture.notesPosts()).toHaveLength(0);
+
+  note.value = "edited";
+  note.dispatchEvent(new Event("blur"));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  expect(fixture.notesPosts()[0][0]).toBe("/notes");
+  expect(fixture.notesPosts()[0][1]).toMatchObject({
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    keepalive: false
+  });
+  expect(JSON.parse(fixture.notesPosts()[0][1].body as string)).toEqual({
+    key: "intro",
+    text: "edited"
+  });
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => {
+    expect(fixture.notes.notes.intro).toBe("edited");
+    expect(status.textContent).toBe("");
+  });
+  note.dispatchEvent(new Event("blur"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(fixture.notesPosts()).toHaveLength(1);
+
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  expect(note.value).toBe("Pause here.\nThen ask.");
+  note.value = "";
+  note.dispatchEvent(new Event("blur"));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(2));
+  expect(JSON.parse(fixture.notesPosts()[1][1].body as string)).toEqual({
+    key: "middle",
+    text: ""
+  });
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect("middle" in fixture.notes.notes).toBe(false));
+  note.dispatchEvent(new Event("blur"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(fixture.notesPosts()).toHaveLength(2);
+});
+
+it("keeps_text_and_shows_the_server_error_when_a_save_fails", async () => {
+  const root = document.createElement("main");
+  const fixture = previewFetchFixture();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountPreviewShell({
+    root,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+  const serverError = "Speaker note text cannot contain -->";
+
+  note.value = "bad -->";
+  note.dispatchEvent(new Event("blur"));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  fixture.resolveNotesPost({
+    ok: false,
+    status: 422,
+    text: async () => JSON.stringify({ error: serverError })
+  } as Response);
+  await vi.waitFor(() => expect(status.textContent).toBe(serverError));
+  expect(note.value).toBe("bad -->");
+  expect(fixture.notes.notes.intro).toBeUndefined();
+
+  note.dispatchEvent(new Event("blur"));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(2));
+});
+
+it("shows_raw_bodies_and_thrown_fetch_errors", async () => {
+  const root = document.createElement("main");
+  const fixture = previewFetchFixture();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountPreviewShell({
+    root,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+
+  note.value = "Keep this draft.";
+  note.dispatchEvent(new Event("blur"));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  fixture.resolveNotesPost({
+    ok: false,
+    status: 500,
+    text: async () => "boom"
+  } as Response);
+  await vi.waitFor(() => expect(status.textContent).toBe("boom"));
+  expect(note.value).toBe("Keep this draft.");
+
+  note.dispatchEvent(new Event("blur"));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(2));
+  expect(status.textContent).toBe("boom");
+  fixture.rejectNotesPost(new TypeError("Failed to fetch"));
+  await vi.waitFor(() => expect(status.textContent).toBe("Failed to fetch"));
+  expect(note.value).toBe("Keep this draft.");
+});
+
+it("serializes_overlapping_flushes", async () => {
+  const root = document.createElement("main");
+  const fixture = previewFetchFixture();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountPreviewShell({
+    root,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+
+  note.value = "A";
+  note.dispatchEvent(new Event("blur"));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  note.value = "AB";
+  note.dispatchEvent(new Event("blur"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(fixture.notesPosts()).toHaveLength(1);
+
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(2));
+  expect(JSON.parse(fixture.notesPosts()[1][1].body as string)).toEqual({
+    key: "intro",
+    text: "AB"
+  });
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => {
+    expect(fixture.notes.notes.intro).toBe("AB");
+    expect(status.textContent).toBe("");
+  });
+});
+
+it("posts_text_typed_behind_an_in_flight_save_even_after_navigation", async () => {
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  const fixture = previewFetchFixture();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 0 }));
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+
+  note.value = "A";
+  note.dispatchEvent(new Event("blur"));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  note.value = "AB";
+  note.dispatchEvent(new Event("blur"));
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  expect(shell.currentIndex).toBe(1);
+
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(2));
+  expect(JSON.parse(fixture.notesPosts()[1][1].body as string)).toEqual({
+    key: "intro",
+    text: "AB"
+  });
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(fixture.notes.notes.intro).toBe("AB"));
+});
+
+it("resize_does_not_overwrite_a_dirty_note", async () => {
+  const root = document.createElement("main");
+  const fixture = previewFetchFixture();
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 1 }));
+  const shell = await mountPreviewShell({
+    root,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+
+  expect(note.value).toBe("Pause here.\nThen ask.");
+  note.value = "Keep this draft.";
+  window.dispatchEvent(new Event("resize"));
+
+  expect(note.value).toBe("Keep this draft.");
+  expect(fixture.notesPosts()).toHaveLength(0);
 });
 
 it("hides the speaker notes panel in grid mode", async () => {

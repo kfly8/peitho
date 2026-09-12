@@ -638,8 +638,11 @@ var PreviewShellController = class {
   slides = [];
   notes = { version: 1, notes: {} };
   notesPanel;
-  notesPosition;
-  notesBody;
+  notesTextarea;
+  notesStatus;
+  notesPositionText;
+  notesTextareaKey = null;
+  flushChain = Promise.resolve(true);
   strip;
   tileClickGuardCleanups = [];
   fontScopeCleanup = null;
@@ -665,6 +668,9 @@ var PreviewShellController = class {
     else this.log.error("Invalid peitho:overviewrequest event");
   };
   onResize = () => this.applyLayout();
+  onNotesBlur = () => {
+    void this.flushNotes();
+  };
   constructor(options) {
     this.root = options.root;
     this.fetcher = options.fetcher ?? fetch.bind(globalThis);
@@ -684,9 +690,17 @@ var PreviewShellController = class {
     }
     this.root.style.background = "#000";
     this.notesPanel = this.createNotesPanel();
-    this.notesPosition = this.notesPanel.querySelector('[data-peitho-preview="position"]');
-    this.notesBody = this.notesPanel.querySelector('[data-peitho-preview="note"]');
+    this.notesTextarea = this.notesPanel.querySelector(
+      '[data-peitho-preview="note"]'
+    );
+    this.notesStatus = this.notesPanel.querySelector(
+      '[data-peitho-preview="status"]'
+    );
+    this.notesPositionText = this.notesPanel.querySelector(
+      '[data-peitho-preview="position"]'
+    );
     this.strip = this.createStrip();
+    this.notesTextarea.addEventListener("blur", this.onNotesBlur);
     this.bus.addEventListener("peitho:navigate", this.onNavigate);
     this.bus.addEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.win.addEventListener("resize", this.onResize);
@@ -739,6 +753,48 @@ var PreviewShellController = class {
     if (!this.isLoaded()) return;
     this.navigateToTarget(to);
   }
+  flushNotes(keepalive = false) {
+    const key = this.notesTextareaKey;
+    const text = this.notesTextarea.value;
+    this.flushChain = this.flushChain.then(
+      () => this.doFlush(key, text, keepalive),
+      () => this.doFlush(key, text, keepalive)
+    );
+    return this.flushChain;
+  }
+  async doFlush(key, text, keepalive) {
+    if (key === null) return true;
+    const dirty = text !== (this.notes.notes[key] ?? "");
+    if (!dirty) {
+      this.notesStatus.textContent = "";
+      return true;
+    }
+    try {
+      const response = await this.fetcher("/notes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key, text }),
+        keepalive
+      });
+      if (response.ok) {
+        if (text === "") delete this.notes.notes[key];
+        else this.notes.notes[key] = text;
+        this.notesStatus.textContent = "";
+        return true;
+      }
+      const body = await response.text();
+      let message = body;
+      try {
+        const error = JSON.parse(body).error;
+        if (typeof error === "string") message = error;
+      } catch {
+      }
+      this.notesStatus.textContent = message;
+    } catch (error) {
+      this.notesStatus.textContent = error instanceof Error ? error.message : String(error);
+    }
+    return false;
+  }
   navigateToTarget(to) {
     const index = this.resolveTarget(to);
     if (index === null) return false;
@@ -754,6 +810,7 @@ var PreviewShellController = class {
     }
   }
   destroy() {
+    this.notesTextarea.removeEventListener("blur", this.onNotesBlur);
     this.bus.removeEventListener("peitho:navigate", this.onNavigate);
     this.bus.removeEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.win.removeEventListener("resize", this.onResize);
@@ -886,26 +943,49 @@ var PreviewShellController = class {
     style.background = "#15181e";
     style.color = "#e5e7eb";
     style.font = "18px/1.5 system-ui, sans-serif";
-    const position = this.doc.createElement("div");
-    position.dataset.peithoPreview = "position";
-    position.style.font = "600 13px/1.5 system-ui, sans-serif";
-    position.style.color = "#9ca3af";
-    position.style.fontVariantNumeric = "tabular-nums";
-    position.style.marginBottom = "4px";
-    panel.appendChild(position);
-    const body = this.doc.createElement("div");
-    body.dataset.peithoPreview = "note";
-    body.style.whiteSpace = "pre-wrap";
-    panel.appendChild(body);
+    style.flexDirection = "column";
+    const positionRow = this.doc.createElement("div");
+    positionRow.style.display = "flex";
+    positionRow.style.font = "600 13px/1.5 system-ui, sans-serif";
+    positionRow.style.color = "#9ca3af";
+    positionRow.style.fontVariantNumeric = "tabular-nums";
+    positionRow.style.marginBottom = "4px";
+    const positionText = this.doc.createElement("span");
+    positionText.dataset.peithoPreview = "position";
+    positionText.style.flexShrink = "0";
+    positionRow.appendChild(positionText);
+    const status = this.doc.createElement("span");
+    status.dataset.peithoPreview = "status";
+    status.style.marginLeft = "auto";
+    status.style.color = "#f87171";
+    status.style.whiteSpace = "pre-wrap";
+    status.style.overflowWrap = "anywhere";
+    positionRow.appendChild(status);
+    panel.appendChild(positionRow);
+    const textarea = this.doc.createElement("textarea");
+    textarea.dataset.peithoPreview = "note";
+    textarea.setAttribute("aria-label", "Speaker notes");
+    textarea.placeholder = NO_NOTES_PLACEHOLDER;
+    textarea.style.background = "transparent";
+    textarea.style.color = "inherit";
+    textarea.style.font = "inherit";
+    textarea.style.border = "none";
+    textarea.style.resize = "none";
+    textarea.style.flex = "1";
+    textarea.style.minHeight = "0";
+    textarea.style.width = "100%";
+    textarea.style.padding = "0";
+    panel.appendChild(textarea);
     return panel;
   }
   renderNotes() {
     const slide = this.slides[this.currentIndex];
-    const note = slide === void 0 ? void 0 : this.notes.notes[slide.meta.key];
-    this.notesPosition.textContent = `${this.currentIndex + 1} / ${this.slides.length}`;
-    this.notesBody.textContent = note ?? NO_NOTES_PLACEHOLDER;
-    this.notesPanel.classList.toggle("is-empty", note == null);
-    this.notesBody.style.opacity = note == null ? "0.5" : "1";
+    const key = slide?.meta.key ?? null;
+    this.notesPositionText.textContent = `${this.currentIndex + 1} / ${this.slides.length}`;
+    if (this.notesTextareaKey !== key) {
+      this.notesTextareaKey = key;
+      this.notesTextarea.value = key === null ? "" : this.notes.notes[key] ?? "";
+    }
   }
   setCanvasRootProperties(dimensions, cssAspect) {
     this.root.style.setProperty("--peitho-canvas-width", `${dimensions.width}px`);
@@ -1025,6 +1105,7 @@ var PreviewShellController = class {
     const thumbScale = thumbWidth / this.dimensions.width;
     const thumbHeight = this.dimensions.height * thumbScale;
     this.notesPanel.hidden = false;
+    this.notesPanel.style.display = "flex";
     this.strip.hidden = false;
     this.strip.style.display = "flex";
     this.renderNotes();
@@ -1086,6 +1167,7 @@ var PreviewShellController = class {
     this.root.style.setProperty("scroll-padding-bottom", `${GRID_PADDING}px`);
     this.root.style.boxSizing = "border-box";
     this.notesPanel.hidden = true;
+    this.notesPanel.style.display = "";
     this.strip.hidden = true;
     this.strip.style.display = "";
     this.slides.forEach((slide, index) => {

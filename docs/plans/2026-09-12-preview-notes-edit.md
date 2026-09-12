@@ -741,6 +741,25 @@ raw body; on a rejected fetch use the thrown error string. Put that value in
 `false`. Add `onNotesBlur` as a stored listener that starts `flushNotes()`,
 attach it to textarea `blur`, and remove it in `destroy`.
 
+**Revision (2026-09-13, PR for this task).** Review found that overlapping blur
+flushes could reach the server out of order (each `POST /notes` runs on its own
+thread), so `flushNotes` snapshots `{key, text}` at enqueue time, queues onto a
+private promise chain, and checks that snapshot against the notes map when its
+turn comes; `flushNotes` is not part of the exported `PreviewShell` type; a
+clean flush clears a stale status; the `is-empty` class is gone (the
+placeholder supplies the look); the textarea carries `aria-label="Speaker
+notes"` and no user-agent padding; the position text is `flex-shrink: 0` and
+the status wraps (`pre-wrap`, `overflow-wrap: anywhere`) so a multi-line server
+error shows as lines. The status is cleared by a clean or successful flush and
+otherwise shows the last failure until the retry settles. Task 8 inherits two
+notes: its transition gate needs no re-check for text typed before its flush
+starts (the chain queues it), but text typed during the request still needs the
+post-await re-check its `reflushes_text_typed_during_a_transition_save` test
+requires; and it must add a test that navigating away and back during an
+in-flight save does not revert the saved text from the stale map, plus a
+`keepalive` fallback for bodies over Chrome's 64 KiB in-flight keepalive limit
+on `pagehide`.
+
 **Verification.**
 
 ```sh

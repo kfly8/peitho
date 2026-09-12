@@ -266,17 +266,24 @@ so the shell can show them verbatim. The server never runs a rebuild itself.
 
 - The note body `<div>` becomes a `<textarea data-peitho-preview="note">`
   styled like the current text (same font, transparent background, no
-  border, no resize handle, fills the panel below the position line). The
-  dimmed placeholder becomes the textarea's `placeholder` attribute.
+  border, no resize handle, fills the panel below the position line) with
+  `aria-label="Speaker notes"`. The dimmed placeholder becomes the
+  textarea's `placeholder` attribute.
 - The position line gains a status span on the right
   (`data-peitho-preview="status"`) that shows the last save error (red) and
   is empty otherwise. No spinner.
 - Dirty is derived, not stored: `textarea.value !== (notes[key] ?? "")`.
-- `flushNotes(keepalive = false)`: if the current slide's textarea is
-  dirty, `POST /notes` with `{key, text}`. On 200 the in-memory `notes`
-  map is updated (entry removed when text is empty). On any error the
-  status shows the message and the textarea keeps its text, so the next
-  flush retries.
+- `flushNotes(keepalive = false)`: if the current slide's textarea is dirty,
+  `POST /notes` with `{key, text}`. On 200 the in-memory `notes` map is updated
+  (entry removed when text is empty) and the status is cleared; a clean flush
+  also clears a stale status. On any error the status shows the message and the
+  textarea keeps its text, so the next flush retries. Flushes are serialized
+  through one promise chain in the shell (revised 2026-09-13 in Task 7 review):
+  each flush snapshots `{key, text}` when enqueued and checks it against the map
+  when its turn comes, so text typed behind an in-flight save is never lost,
+  overlapping blurs never send the same text twice, and same-key saves reach the
+  server in order (the server handles each request on its own thread, so client
+  ordering is the only ordering).
 - Flush points: textarea `blur`, the start of `setIndex` (before
   `currentIndex` moves), `exitGrid`/`enterGrid` when the index changes,
   and `pagehide` with `keepalive: true`. `saveState` (called by
