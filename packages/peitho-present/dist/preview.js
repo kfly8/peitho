@@ -729,7 +729,6 @@ var PreviewShellController = class {
     if (rootPosition === "static" || rootPosition === "") {
       this.root.style.position = "relative";
     }
-    this.root.style.background = "#000";
     this.notesPanel = this.createNotesPanel();
     this.notesTextarea = this.notesPanel.querySelector(
       '[data-peitho-preview="note"]'
@@ -787,12 +786,23 @@ var PreviewShellController = class {
       this.applyLayout();
       if (this.notesTextareaKey === null) this.renderNotes();
       this.restoreDraft(restored?.draft);
+      this.markReady();
       this.dispatchSlideChange(null);
     } catch (error) {
       this.clearCanvasRootProperties();
       this.root.replaceChildren();
       this.root.textContent = error instanceof Error ? error.message : String(error);
+      this.markReady();
     }
+  }
+  /**
+   * Paint the black ground only now that the root has content (or an error message).
+   * Until this runs the new document paints nothing, so a reload holds the previous
+   * frame instead of flashing black for the duration of the mount.
+   */
+  markReady() {
+    this.root.style.background = "#000";
+    this.doc.documentElement.dataset.peithoReady = "";
   }
   navigate(to) {
     if (!this.isLoaded()) return;

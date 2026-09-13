@@ -2484,3 +2484,62 @@ it("walks the filmstrip with ArrowUp/ArrowDown in single mode, skipping skipped 
   expect(atStart.defaultPrevented).toBe(false);
   expect(shell.currentIndex).toBe(0);
 });
+
+it("marks the document ready only once the root has content, so a reload holds the previous frame", async () => {
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  delete document.documentElement.dataset.peithoReady;
+
+  let readyWhileEmpty: boolean | null = null;
+  const fetcher = standardFetch();
+  const watchingFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    // Every fetch of the mount happens before content lands; the ground must stay unpainted.
+    if (readyWhileEmpty !== true) {
+      readyWhileEmpty =
+        document.documentElement.dataset.peithoReady !== undefined && root.children.length === 0;
+    }
+    return fetcher(input, init);
+  }) as unknown as typeof fetch;
+
+  const shell = await mountPreviewShell({
+    root,
+    bus: new EventTarget(),
+    fetcher: watchingFetch,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  expect(readyWhileEmpty).toBe(false);
+  expect(root.children.length).toBeGreaterThan(0);
+  expect(document.documentElement.dataset.peithoReady).toBe("");
+  expect(root.style.background).toBe("rgb(0, 0, 0)");
+
+  root.remove();
+  delete document.documentElement.dataset.peithoReady;
+});
+
+it("paints the ground on the error path so a failed mount is not invisible", async () => {
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  delete document.documentElement.dataset.peithoReady;
+
+  const shell = await mountPreviewShell({
+    root,
+    bus: new EventTarget(),
+    fetcher: (async () => {
+      throw new Error("deck is broken");
+    }) as unknown as typeof fetch,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  expect(root.textContent).toContain("deck is broken");
+  expect(document.documentElement.dataset.peithoReady).toBe("");
+
+  root.remove();
+  delete document.documentElement.dataset.peithoReady;
+});

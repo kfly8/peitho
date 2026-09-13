@@ -1952,8 +1952,13 @@ pub fn render_preview_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> Strin
   <title>Peitho Preview</title>
   <style>
     :root { --peitho-canvas-width: __PEITHO_CANVAS_WIDTH__px; --peitho-canvas-height: __PEITHO_CANVAS_HEIGHT__px; --peitho-canvas-aspect: __PEITHO_CANVAS_ASPECT__; }
-    html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
-    #peitho-preview-root { position: fixed; inset: 0; overflow: hidden; background: #000; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+    /* The black ground is painted only once the shell has slides in the DOM. A reload
+       otherwise commits a fully black frame for the ~100ms mount, which reads as a flash;
+       painting nothing lets Chrome hold the previous document's frame until content lands. */
+    html[data-peitho-ready], html[data-peitho-ready] body { background: #000; }
+    #peitho-preview-root { position: fixed; inset: 0; overflow: hidden; }
+    html[data-peitho-ready] #peitho-preview-root { background: #000; }
   </style>
 </head>
 <body>
@@ -1964,6 +1969,7 @@ pub fn render_preview_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> Strin
     function showError(message) {
       const root = document.getElementById('peitho-preview-root');
       root.textContent = message;
+      document.documentElement.dataset.peithoReady = '';
     }
 
     async function main() {
