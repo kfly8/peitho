@@ -343,8 +343,43 @@ pub(crate) fn content_type(path: &Path) -> &'static str {
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
         _ => "application/octet-stream",
     }
+}
+
+/// Font directories are the only cacheable responses.
+///
+/// `peitho preview` reloads the whole document on every rebuild, and a new document starts
+/// with an empty font set. Without a freshness header Chrome refetches every face over HTTP
+/// before it can paint text in the real font, which reads as a stutter after the slides land.
+/// Fonts are the one asset class a rebuild does not change, so they are safe to cache; every
+/// other response (manifest, slide fragments, CSS, JS) MUST stay uncached or the watch loop
+/// would serve stale content after a rebuild.
+///
+/// The filenames are author-controlled, not content-hashed, so this deliberately stops short
+/// of `immutable`: a replaced font file must still be picked up without restarting preview.
+/// A few minutes keeps every reload in an editing session off the network while bounding how
+/// long a swapped face can be stale, and the reload is a normal navigation, so the cached
+/// entry is used rather than force-revalidated.
+const FONT_ASSET_DIRECTORIES: [&str; 3] = ["fonts", "theme-fonts", "katex-fonts"];
+
+fn cache_control(request_url: &str) -> Option<&'static str> {
+    let path = request_url.split(['?', '#']).next().unwrap_or_default();
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    let directory = segments.next()?;
+    // Only a file directly inside a font directory qualifies; nothing deeper, nothing else.
+    if !FONT_ASSET_DIRECTORIES.contains(&directory) {
+        return None;
+    }
+    let file = segments.next()?;
+    if segments.next().is_some() || file.is_empty() {
+        return None;
+    }
+    Some("public, max-age=300")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -877,7 +912,15 @@ impl PresentServer {
                     eprintln!("warning: failed to build Content-Type header");
                     return;
                 };
-                send_response(request, Response::from_data(bytes).with_header(header));
+                let mut response = Response::from_data(bytes).with_header(header);
+                if let Some(directive) = cache_control(request.url()) {
+                    match Header::from_bytes("Cache-Control", directive) {
+                        Ok(header) => response = response.with_header(header),
+                        // A missing freshness header only costs a refetch, so serve it anyway.
+                        Err(_) => eprintln!("warning: failed to build Cache-Control header"),
+                    }
+                }
+                send_response(request, response);
             }
             Err(_) => {
                 send_response(
@@ -1580,6 +1623,47 @@ mod tests {
             "present.html"
         )
         .is_none());
+    }
+
+    #[test]
+    fn caches_only_font_directory_files() {
+        // Fonts are the one asset a rebuild does not change, so only these may be cached.
+        for url in [
+            "/fonts/Custom.woff2",
+            "/theme-fonts/Inter-Regular.woff2",
+            "/katex-fonts/KaTeX_Main-Regular.woff2",
+            "/theme-fonts/Inter-Regular.woff2?v=2",
+        ] {
+            assert_eq!(cache_control(url), Some("public, max-age=300"), "{url}");
+        }
+
+        // Everything the watch loop must re-read after a rebuild stays uncached.
+        for url in [
+            "/manifest.json",
+            "/notes.json",
+            "/peitho.css",
+            "/preview.js",
+            "/index.html",
+            "/slides/slide-1.html",
+            "/",
+            "/fonts",
+            "/fonts/",
+            "/fonts/nested/Custom.woff2",
+            "/img/theme-fonts/Inter-Regular.woff2",
+        ] {
+            assert_eq!(cache_control(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn maps_font_content_types() {
+        assert_eq!(
+            content_type(Path::new("theme-fonts/Inter.woff2")),
+            "font/woff2"
+        );
+        assert_eq!(content_type(Path::new("fonts/Custom.woff")), "font/woff");
+        assert_eq!(content_type(Path::new("fonts/Custom.ttf")), "font/ttf");
+        assert_eq!(content_type(Path::new("fonts/Custom.otf")), "font/otf");
     }
 
     #[test]
