@@ -2,7 +2,7 @@ import type { Manifest } from "../../../bindings/Manifest";
 import type { ManifestSlide } from "../../../bindings/ManifestSlide";
 import { installCanvasScaler, type CanvasViewport } from "./canvas";
 import { installDocumentFontScope } from "./fontscope";
-import { waitForFontsReady } from "./fontsReady";
+import { deckText, waitForFontsReady } from "./fontsReady";
 import { initialSlideIndex } from "./skipnav";
 import { clampStep, resolveStepTarget, revealStepCount } from "./stepnav";
 
@@ -613,13 +613,20 @@ class PresentShellController implements PresentShell {
       this.setCanvasRootProperties(dimensions, cssAspect);
       const css = await this.fetchText("peitho.css");
       this.fontScopeCleanup = installDocumentFontScope(this.doc, css);
-      await waitForFontsReady(this.doc, this.win, { log: this.log });
-      const pending: SlideView[] = [];
+      // Fetch the slide HTML before waiting on fonts: the deck's own text is what selects
+      // which `unicode-range` subsets are worth fetching (see waitForFontsReady).
+      const sources: { slide: (typeof manifest.slides)[number]; html: string }[] = [];
       for (const slide of manifest.slides) {
-        const html = await this.fetchText(slide.src);
-        const host = this.createSlideHost(slide, html, css, dimensions);
-        pending.push({ meta: slide, host });
+        sources.push({ slide, html: await this.fetchText(slide.src) });
       }
+      await waitForFontsReady(this.doc, this.win, {
+        log: this.log,
+        text: deckText(sources.map((source) => source.html))
+      });
+      const pending: SlideView[] = sources.map(({ slide, html }) => ({
+        meta: slide,
+        host: this.createSlideHost(slide, html, css, dimensions)
+      }));
       this.manifest = manifest;
       for (const view of pending) {
         this.root.appendChild(view.host);
