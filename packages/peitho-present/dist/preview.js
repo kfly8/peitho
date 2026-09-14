@@ -47,7 +47,16 @@ var FONT_SCOPE_ATTRIBUTE = "data-peitho-font-scope";
 var FONT_SCOPE_SELECTOR = `style[${FONT_SCOPE_ATTRIBUTE}]`;
 var fontScopeStates = /* @__PURE__ */ new WeakMap();
 function extractFontScopeCss(css) {
-  return [...extractLeadingImports(css), ...extractTopLevelFontFaces(css)].join("\n");
+  return [
+    ...extractLeadingImports(css),
+    ...extractTopLevelFontFaces(css).map(forceFontDisplayBlock)
+  ].join("\n");
+}
+function forceFontDisplayBlock(block) {
+  const stripped = block.replace(/font-display\s*:[^;}]*;?/gi, "");
+  const close = stripped.lastIndexOf("}");
+  if (close === -1) return block;
+  return `${stripped.slice(0, close)}font-display:block;${stripped.slice(close)}`;
 }
 function installDocumentFontScope(doc, css) {
   const fontCss = extractFontScopeCss(css);

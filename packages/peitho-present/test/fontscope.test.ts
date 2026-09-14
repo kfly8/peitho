@@ -30,7 +30,7 @@ it("does not promote imports after ordinary rules", () => {
   expect(extractFontScopeCss(css)).toBe(
     [
       '@import url("fonts/prefix.css");',
-      '@font-face { font-family: "Late"; src: url("fonts/late.woff2"); }'
+      '@font-face { font-family: "Late"; src: url("fonts/late.woff2"); font-display:block;}'
     ].join("\n")
   );
 });
@@ -48,8 +48,8 @@ it("extracts top level font face blocks from anywhere", () => {
 
   expect(extractFontScopeCss(css)).toBe(
     [
-      '@font-face { font-family: "Heading"; src: url("fonts/heading.woff2"); }',
-      '@font-face {\n  font-family: "Body";\n  src: url("fonts/body.woff2");\n}'
+      '@font-face { font-family: "Heading"; src: url("fonts/heading.woff2"); font-display:block;}',
+      '@font-face {\n  font-family: "Body";\n  src: url("fonts/body.woff2");\nfont-display:block;}'
     ].join("\n")
   );
 });
@@ -71,7 +71,7 @@ it("skips comments and strings while scanning font face blocks", () => {
       '  font-family: "Brace } Face";',
       '  src: url("fonts/{brace}.woff2");',
       "  unicode-range: U+0-5FF; /* } */",
-      "}"
+      "font-display:block;}"
     ].join("\n")
   );
 });
@@ -85,4 +85,31 @@ it("omits non font rules", () => {
 `;
 
   expect(extractFontScopeCss(css)).toBe("");
+});
+
+it("replaces an authored font-display with block", () => {
+  const css = `@font-face { font-family: "Inter"; src: url("theme-fonts/Inter.woff2"); font-display: swap; }`;
+
+  const scoped = extractFontScopeCss(css);
+  expect(scoped).not.toContain("swap");
+  expect(scoped.match(/font-display/g)).toHaveLength(1);
+  expect(scoped).toContain("font-display:block;");
+});
+
+it("adds block to a face that declares no font-display", () => {
+  const css = `@font-face { font-family: "Inter"; src: url("theme-fonts/Inter.woff2"); }`;
+
+  expect(extractFontScopeCss(css)).toContain("font-display:block;");
+});
+
+it("forces block on every face, not just the first", () => {
+  const css = `
+@font-face { font-family: "A"; src: url("a.woff2"); font-display: swap; }
+@font-face { font-family: "B"; src: url("b.woff2"); font-display: optional; }
+`;
+
+  const scoped = extractFontScopeCss(css);
+  expect(scoped.match(/font-display:block;/g)).toHaveLength(2);
+  expect(scoped).not.toContain("swap");
+  expect(scoped).not.toContain("optional");
 });
