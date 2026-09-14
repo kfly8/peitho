@@ -66,7 +66,7 @@ afterEach(() => {
 it("waits for document fonts before appending slide hosts", async () => {
   const root = document.createElement("main");
   const fontsReady = deferred<void>();
-  const load = vi.fn(async () => []);
+  const load = vi.fn(async (_font: string, _text?: string) => []);
   Object.defineProperty(document, "fonts", {
     configurable: true,
     value: {
@@ -98,7 +98,7 @@ it("waits for document fonts before appending slide hosts", async () => {
   expect(load).toHaveBeenCalledTimes(1);
   expect(load.mock.calls[0]?.[0]).toBe("normal 400 1em Deck");
   // Deduped characters, not the raw markup: every glyph of "Intro", no tags.
-  const text = load.mock.calls[0]?.[1] as string;
+  const text = load.mock.calls[0]?.[1] ?? "";
   for (const char of "Intro") expect(text).toContain(char);
   expect(text).not.toContain("<");
 
