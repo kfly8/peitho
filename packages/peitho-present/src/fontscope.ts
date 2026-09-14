@@ -9,7 +9,29 @@ type FontScopeState = {
 const fontScopeStates = new WeakMap<Document, FontScopeState>();
 
 export function extractFontScopeCss(css: string): string {
-  return [...extractLeadingImports(css), ...extractTopLevelFontFaces(css)].join("\n");
+  return [
+    ...extractLeadingImports(css),
+    ...extractTopLevelFontFaces(css).map(forceFontDisplayBlock)
+  ].join("\n");
+}
+
+/**
+ * Force `font-display: block` on every hoisted face.
+ *
+ * The shell mounts slides only after `waitForFontsReady`, so by first paint the faces are
+ * already loaded and `block` never actually blocks. What it removes is the swap: under the
+ * authored `swap`, a reload paints text in the fallback face and reflows it when the real
+ * face arrives, which reads as text shifting on every watch rebuild. `block` keeps that
+ * text unpainted for the few cached milliseconds instead, so it appears once, in place.
+ *
+ * This rewrites only the document-scope copy the shell injects; the author's CSS on disk
+ * and the build output are untouched, so `dist/` keeps whatever the author asked for.
+ */
+function forceFontDisplayBlock(block: string): string {
+  const stripped = block.replace(/font-display\s*:[^;}]*;?/gi, "");
+  const close = stripped.lastIndexOf("}");
+  if (close === -1) return block;
+  return `${stripped.slice(0, close)}font-display:block;${stripped.slice(close)}`;
 }
 
 export function installDocumentFontScope(doc: Document, css: string): () => void {

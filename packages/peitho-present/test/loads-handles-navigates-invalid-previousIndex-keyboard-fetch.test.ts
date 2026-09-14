@@ -229,7 +229,7 @@ it("injects document scoped font css once for present shells", async () => {
   expect(styles[0].textContent).toBe(
     [
       '@import url("fonts/noto-sans-jp/index.css");',
-      '@font-face { font-family: "Noto Sans JP"; src: url("fonts/noto.woff2"); }'
+      '@font-face { font-family: "Noto Sans JP"; src: url("fonts/noto.woff2"); font-display:block;}'
     ].join("\n")
   );
 });
