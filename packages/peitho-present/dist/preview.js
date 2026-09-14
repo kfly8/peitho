@@ -832,7 +832,7 @@ var PreviewShellController = class {
   async doFlush(key, text, keepalive) {
     if (key === null) return true;
     if (!this.isDirty(key, text)) {
-      this.notesStatus.textContent = "";
+      this.setNotesStatus("");
       return true;
     }
     try {
@@ -847,7 +847,7 @@ var PreviewShellController = class {
       if (response.ok) {
         if (text === "") delete this.notes.notes[key];
         else this.notes.notes[key] = text;
-        this.notesStatus.textContent = "";
+        this.setNotesStatus("");
         return true;
       }
       const body = await response.text();
@@ -857,9 +857,9 @@ var PreviewShellController = class {
         if (typeof error === "string") message = error;
       } catch {
       }
-      this.notesStatus.textContent = message;
+      this.setNotesStatus(message);
     } catch (error) {
-      this.notesStatus.textContent = error instanceof Error ? error.message : String(error);
+      this.setNotesStatus(error instanceof Error ? error.message : String(error));
     }
     return false;
   }
@@ -1035,6 +1035,7 @@ var PreviewShellController = class {
     positionRow.appendChild(positionText);
     const status = this.doc.createElement("span");
     status.dataset.peithoPreview = "status";
+    status.setAttribute("role", "alert");
     status.style.marginLeft = "auto";
     status.style.color = "#f87171";
     status.style.whiteSpace = "pre-wrap";
@@ -1057,6 +1058,21 @@ var PreviewShellController = class {
     textarea.style.outlineOffset = "4px";
     panel.appendChild(textarea);
     return panel;
+  }
+  /**
+   * The only writer of the notes status. A save failure is the one thing in preview the
+   * author must not miss (the server may be gone), so a non-empty status turns the whole
+   * notes panel into the alert: red chip plus a red panel border.
+   */
+  setNotesStatus(message) {
+    this.notesStatus.textContent = message;
+    const failed = message !== "";
+    this.notesStatus.style.background = failed ? "#7f1d1d" : "";
+    this.notesStatus.style.color = failed ? "#fee2e2" : "#f87171";
+    this.notesStatus.style.padding = failed ? "2px 10px" : "";
+    this.notesStatus.style.borderRadius = failed ? "999px" : "";
+    this.notesPanel.style.borderTop = failed ? "3px solid #ef4444" : "1px solid rgba(255,255,255,0.16)";
+    this.notesPanel.style.background = failed ? "#241416" : "#15181e";
   }
   renderNotes() {
     const slide = this.slides[this.currentIndex];

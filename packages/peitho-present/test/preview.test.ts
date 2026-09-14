@@ -1621,6 +1621,9 @@ it("shows_raw_bodies_and_thrown_fetch_errors", async () => {
   } as Response);
   await vi.waitFor(() => expect(status.textContent).toBe("boom"));
   expect(note.value).toBe("Keep this draft.");
+  const panel = root.querySelector<HTMLElement>('[data-peitho-preview="notes"]')!;
+  expect(status.style.background).not.toBe("");
+  expect(panel.style.borderTop).toBe("3px solid rgb(239, 68, 68)");
 
   note.dispatchEvent(new Event("blur"));
   await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(2));
