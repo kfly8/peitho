@@ -36,7 +36,7 @@ mod lint;
 mod new_cmd;
 
 use asset_resolution::{resolve_assets, Provenance, ResolvedAssets};
-use diagnostics::{plain_diagnostic_text, render_diagnostic, DeckDiagnostic};
+use diagnostics::{plain_diagnostic_text, render_diagnostic, DeckDiagnostic, LabelStyle};
 use peitho::{browser, server};
 use peitho_core::domain::SlideKey;
 
@@ -432,15 +432,25 @@ struct WatchState {
     targets: WatchTargets,
     watched_dirs: Vec<PathBuf>,
     emitted_watch_error_notes: HashSet<String>,
+    /// Label style for the notes this state emits. It rides the struct rather
+    /// than each method's argument list because the notes are written to a
+    /// `&mut dyn Write`, which cannot report whether it is a terminal.
+    style: LabelStyle,
 }
 
 impl WatchState {
-    fn new(input: PathBuf, targets: WatchTargets, watched_dirs: Vec<PathBuf>) -> Self {
+    fn new(
+        input: PathBuf,
+        targets: WatchTargets,
+        watched_dirs: Vec<PathBuf>,
+        style: LabelStyle,
+    ) -> Self {
         Self {
             input,
             targets,
             watched_dirs,
             emitted_watch_error_notes: HashSet::new(),
+            style,
         }
     }
 
@@ -456,6 +466,7 @@ impl WatchState {
             &desired_dirs,
             stderr,
             &mut self.emitted_watch_error_notes,
+            self.style,
         )?;
         if !result.had_failures {
             self.emitted_watch_error_notes.clear();
@@ -475,6 +486,7 @@ impl WatchState {
             &desired_dirs,
             stderr,
             &mut self.emitted_watch_error_notes,
+            self.style,
         )?;
         Ok(result.changed)
     }
@@ -486,7 +498,9 @@ impl WatchState {
     ) -> miette::Result<()> {
         let key = err.to_string();
         let note = format!(
-            "note: watch error: {err}\nhelp: missing watch targets are dropped and re-watched automatically when they reappear or on the next relevant change (deck, include, image, or asset save); if this error persists, check file watcher permissions"
+            "{note_label}watch error: {err}\n{help_label}missing watch targets are dropped and re-watched automatically when they reappear or on the next relevant change (deck, include, image, or asset save); if this error persists, check file watcher permissions",
+            note_label = self.style.note(),
+            help_label = self.style.help(),
         );
         write_suppressed_watch_note(&key, &note, stderr, &mut self.emitted_watch_error_notes)?;
         Ok(())
@@ -987,12 +1001,14 @@ fn run() -> miette::Result<()> {
         }),
         Command::Rehearsal { all } => {
             let mut stdout = std::io::stdout();
+            let style = LabelStyle::for_stream(&stdout);
             run_rehearsal(
                 RehearsalOptions {
                     all,
                     rehearsals_dir: PathBuf::from(REHEARSALS_DIR),
                 },
                 &mut stdout,
+                style,
             )
         }
         Command::Publish { dist, command } => {
@@ -1575,7 +1591,8 @@ fn prepare_watch_loop(input: PathBuf) -> miette::Result<WatchRuntime> {
     {
         let mut watcher = NotifyWatchController::new(debouncer.watcher());
         let watched_dirs = register_watch_target_dirs(&targets, &mut watcher)?;
-        let state = WatchState::new(input, targets, watched_dirs);
+        // Watch notes are always written to stderr (see `watch_paths_loop`).
+        let state = WatchState::new(input, targets, watched_dirs, LabelStyle::for_stderr());
 
         Ok(WatchRuntime {
             state,
@@ -1685,7 +1702,8 @@ fn refresh_watch_targets(state: &mut WatchState, stderr: &mut dyn Write) -> miet
     }
     writeln!(
         stderr,
-        "note: watching new asset paths from frontmatter: {}",
+        "{}watching new asset paths from frontmatter: {}",
+        state.style.note(),
         describe_resolved_assets(&state.targets.assets)
     )
     .into_diagnostic()?;
@@ -1729,6 +1747,7 @@ fn reconcile_watched_dirs(
     desired_dirs: &[PathBuf],
     stderr: &mut dyn Write,
     emitted_watch_error_notes: &mut HashSet<String>,
+    style: LabelStyle,
 ) -> miette::Result<ReconcileResult> {
     let previous_dirs = watched_dirs
         .iter()
@@ -1753,8 +1772,11 @@ fn reconcile_watched_dirs(
     for (key, old) in previous_dirs {
         if !desired_keys.contains(&key) {
             if let Err(err) = watcher.unwatch_dir(&old) {
-                let note = format!("note: failed to stop watching {}: {err}", old.display());
-                write_suppressed_watch_note(&note, &note, stderr, emitted_watch_error_notes)?;
+                // The key is the unstyled text so suppression does not depend
+                // on whether this run is writing to a terminal.
+                let key = format!("failed to stop watching {}: {err}", old.display());
+                let note = format!("{}{key}", style.note());
+                write_suppressed_watch_note(&key, &note, stderr, emitted_watch_error_notes)?;
                 had_failures = true;
             }
         } else {
@@ -1765,8 +1787,9 @@ fn reconcile_watched_dirs(
     for (key, new) in desired_dirs {
         if !previous_keys.contains(&key) {
             if let Err(err) = watcher.watch_dir(&new) {
-                let note = format!("note: failed to watch {}: {err}", new.display());
-                write_suppressed_watch_note(&note, &note, stderr, emitted_watch_error_notes)?;
+                let key = format!("failed to watch {}: {err}", new.display());
+                let note = format!("{}{key}", style.note());
+                write_suppressed_watch_note(&key, &note, stderr, emitted_watch_error_notes)?;
                 had_failures = true;
             } else {
                 next_keys.insert(key);
@@ -3629,7 +3652,11 @@ fn rehearsal_record_recovery_help(path: &Path) -> String {
     )
 }
 
-fn run_rehearsal(options: RehearsalOptions, stdout: &mut dyn Write) -> miette::Result<()> {
+fn run_rehearsal(
+    options: RehearsalOptions,
+    stdout: &mut dyn Write,
+    style: LabelStyle,
+) -> miette::Result<()> {
     let records = if options.all {
         rehearsal_record_paths_by_name(&options.rehearsals_dir)?
             .into_iter()
@@ -3653,7 +3680,8 @@ fn run_rehearsal(options: RehearsalOptions, stdout: &mut dyn Write) -> miette::R
         .into_diagnostic()?;
         writeln!(
             stdout,
-            "help: run peitho present --rehearsal deck.md to record one"
+            "{}run peitho present --rehearsal deck.md to record one",
+            style.help()
         )
         .into_diagnostic()?;
         return Ok(());
@@ -4025,7 +4053,8 @@ fn present(options: PresentOptions) -> miette::Result<()> {
                 }
                 Err(err) => {
                     eprintln!(
-                        "warning: failed to render remote control QR for {}: {err}",
+                        "{}failed to render remote control QR for {}: {err}",
+                        LabelStyle::for_stderr().warning(),
                         qr.url
                     );
                 }
@@ -4373,7 +4402,10 @@ fn remote_url_candidates_from_interfaces(
     let addrs = match if_addrs::get_if_addrs() {
         Ok(addrs) => addrs.into_iter().map(|addr| addr.ip()).collect::<Vec<_>>(),
         Err(err) => {
-            eprintln!("warning: failed to enumerate network interfaces for remote URL: {err}");
+            eprintln!(
+                "{}failed to enumerate network interfaces for remote URL: {err}",
+                LabelStyle::for_stderr().warning()
+            );
             Vec::new()
         }
     };
@@ -4404,7 +4436,9 @@ fn preview(options: PreviewOptions) -> miette::Result<()> {
     println!("serving preview at {url}");
     std::io::stdout().flush().into_diagnostic()?;
     if !options.no_open {
-        open_preview_browser_or_warn(&url, &mut std::io::stderr(), open_default_browser)?;
+        let mut stderr = std::io::stderr();
+        let style = LabelStyle::for_stream(&stderr);
+        open_preview_browser_or_warn(&url, &mut stderr, style, open_default_browser)?;
     }
     server.serve_forever()
 }
@@ -4556,13 +4590,23 @@ fn open_default_browser(url: &str) -> miette::Result<()> {
         })
 }
 
-fn open_preview_browser_or_warn<F>(url: &str, stderr: &mut dyn Write, open: F) -> miette::Result<()>
+fn open_preview_browser_or_warn<F>(
+    url: &str,
+    stderr: &mut dyn Write,
+    style: LabelStyle,
+    open: F,
+) -> miette::Result<()>
 where
     F: FnOnce(&str) -> miette::Result<()>,
 {
     if let Err(err) = open(url) {
-        writeln!(stderr, "warning: failed to open preview browser: {err}").into_diagnostic()?;
-        writeln!(stderr, "help: open {url} manually").into_diagnostic()?;
+        writeln!(
+            stderr,
+            "{}failed to open preview browser: {err}",
+            style.warning()
+        )
+        .into_diagnostic()?;
+        writeln!(stderr, "{}open {url} manually", style.help()).into_diagnostic()?;
         stderr.flush().into_diagnostic()?;
     }
     Ok(())
@@ -6227,7 +6271,7 @@ contexts:
         let targets = resolve_watch_targets(&deck).unwrap();
         assert!(!targets.is_relevant_change(&image));
         let watched_dirs = targets.watch_dirs();
-        let mut state = WatchState::new(deck, targets, watched_dirs);
+        let mut state = WatchState::new(deck, targets, watched_dirs, LabelStyle::PLAIN);
         let mut watcher = RecordingWatchController::default();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -6415,7 +6459,7 @@ contexts:
             watched_dirs.iter().any(|path| path == &shared),
             "actual dirs: {watched_dirs:?}"
         );
-        let mut state = WatchState::new(deck, targets, watched_dirs);
+        let mut state = WatchState::new(deck, targets, watched_dirs, LabelStyle::PLAIN);
         let mut watcher = RecordingWatchController::default();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -6633,6 +6677,7 @@ contexts:
             fixture.options.input.clone(),
             fixture.targets.clone(),
             fixture.targets.watch_dirs(),
+            LabelStyle::PLAIN,
         );
         fs::remove_dir_all(&old_layouts).unwrap();
         fs::write(
@@ -6668,7 +6713,7 @@ contexts:
             Provenance::DeckAdjacent(layouts.clone())
         );
         let watched_dirs = targets.watch_dirs();
-        let mut state = WatchState::new(deck.clone(), targets, watched_dirs);
+        let mut state = WatchState::new(deck.clone(), targets, watched_dirs, LabelStyle::PLAIN);
         fs::write(&deck, "---\nlayouts: ./layouts\n---\n# Intro\n").unwrap();
         let mut stderr = Vec::new();
 
@@ -6703,7 +6748,7 @@ contexts:
         );
         let watched_dirs = targets.watch_dirs();
         assert!(watched_dirs.iter().any(|path| path == &explicit_layouts));
-        let mut state = WatchState::new(deck.clone(), targets, watched_dirs);
+        let mut state = WatchState::new(deck.clone(), targets, watched_dirs, LabelStyle::PLAIN);
         let mut watcher = RecordingWatchController::default();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -6840,7 +6885,7 @@ contexts:
         fs::create_dir_all(&fonts).unwrap();
         fs::write(&deck, "---\nfonts: ./sub/fonts\n---\n# Intro\n").unwrap();
         let targets = resolve_watch_targets(&deck).unwrap();
-        let mut state = WatchState::new(deck, targets, vec![root.clone()]);
+        let mut state = WatchState::new(deck, targets, vec![root.clone()], LabelStyle::PLAIN);
         fs::remove_dir_all(&sub).unwrap();
         fs::create_dir_all(&fonts).unwrap();
         let mut watcher = RecordingWatchController::default();
@@ -6910,7 +6955,7 @@ contexts:
         fs::write(&deck, "---\nfonts: ./fonts\n---\n# Intro\n").unwrap();
         let targets = resolve_watch_targets(&deck).unwrap();
         let watched_dirs = targets.watch_dirs();
-        let mut state = WatchState::new(deck, targets, watched_dirs);
+        let mut state = WatchState::new(deck, targets, watched_dirs, LabelStyle::PLAIN);
         let hidden = fonts.join(".hidden");
         let hidden_file = hidden.join("a.woff2");
         fs::create_dir_all(&hidden).unwrap();
@@ -7037,6 +7082,7 @@ contexts:
             fixture.options.input.clone(),
             fixture.targets.clone(),
             watched_dirs.clone(),
+            LabelStyle::PLAIN,
         );
 
         assert_eq!(state.input, fixture.options.input);
@@ -7122,6 +7168,7 @@ contexts:
             &desired_dirs,
             &mut stderr,
             &mut emitted_notes,
+            LabelStyle::PLAIN,
         )
         .unwrap();
 
@@ -7171,6 +7218,7 @@ contexts:
             &desired_dirs,
             &mut stderr,
             &mut emitted_notes,
+            LabelStyle::PLAIN,
         )
         .unwrap();
 
@@ -7203,6 +7251,7 @@ contexts:
             &desired_dirs,
             &mut stderr,
             &mut emitted_notes,
+            LabelStyle::PLAIN,
         )
         .unwrap();
 
@@ -7218,6 +7267,7 @@ contexts:
             &desired_dirs,
             &mut stderr,
             &mut emitted_notes,
+            LabelStyle::PLAIN,
         )
         .unwrap();
 
@@ -7249,6 +7299,7 @@ contexts:
             &desired_dirs,
             &mut stderr,
             &mut emitted_notes,
+            LabelStyle::PLAIN,
         )
         .unwrap();
 
@@ -9528,6 +9579,7 @@ exec sleep 30
                 rehearsals_dir: rehearsals,
             },
             &mut stdout,
+            LabelStyle::PLAIN,
         )
         .unwrap();
 
@@ -9556,6 +9608,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
                 rehearsals_dir: missing.clone(),
             },
             &mut stdout,
+            LabelStyle::PLAIN,
         )
         .unwrap();
 
@@ -9589,6 +9642,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
                 rehearsals_dir: rehearsals,
             },
             &mut stdout,
+            LabelStyle::PLAIN,
         )
         .unwrap();
         let stdout = String::from_utf8(stdout).unwrap();
@@ -9619,6 +9673,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
                 rehearsals_dir: rehearsals,
             },
             &mut stdout,
+            LabelStyle::PLAIN,
         )
         .unwrap();
         let stdout = String::from_utf8(stdout).unwrap();
@@ -9648,6 +9703,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
                 rehearsals_dir: dir.path().to_path_buf(),
             },
             &mut stdout,
+            LabelStyle::PLAIN,
         )
         .unwrap_err();
         let message = err.to_string();
@@ -9678,6 +9734,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
                 rehearsals_dir: dir.path().to_path_buf(),
             },
             &mut stdout,
+            LabelStyle::PLAIN,
         )
         .unwrap_err();
         let message = err.to_string();
@@ -9716,6 +9773,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
                 rehearsals_dir: dir.path().to_path_buf(),
             },
             &mut stdout,
+            LabelStyle::PLAIN,
         )
         .unwrap();
         let stdout = String::from_utf8(stdout).unwrap();
@@ -9754,6 +9812,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
                 rehearsals_dir: dir.path().to_path_buf(),
             },
             &mut stdout,
+            LabelStyle::PLAIN,
         )
         .unwrap();
 
@@ -10232,9 +10291,12 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
     fn preview_browser_open_failure_is_reported_without_error() {
         let mut stderr = Vec::new();
 
-        open_preview_browser_or_warn("http://127.0.0.1:4321/", &mut stderr, |_url| {
-            Err(miette::miette!("open failed"))
-        })
+        open_preview_browser_or_warn(
+            "http://127.0.0.1:4321/",
+            &mut stderr,
+            LabelStyle::PLAIN,
+            |_url| Err(miette::miette!("open failed")),
+        )
         .unwrap();
 
         let stderr = String::from_utf8(stderr).unwrap();
@@ -11131,7 +11193,11 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         fs::write(&deck, "---\nfonts: ./fonts\n---\n# Intro\n").unwrap();
         let targets = resolve_watch_targets(&deck).unwrap();
         let watched_dirs = targets.watch_dirs();
-        (dir, WatchState::new(deck, targets, watched_dirs), fonts)
+        (
+            dir,
+            WatchState::new(deck, targets, watched_dirs, LabelStyle::PLAIN),
+            fonts,
+        )
     }
 
     fn watch_state_for_fixture(fixture: &WatchFixture) -> WatchState {
@@ -11139,6 +11205,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
             fixture.options.input.clone(),
             fixture.targets.clone(),
             fixture.targets.watch_dirs(),
+            LabelStyle::PLAIN,
         )
     }
 

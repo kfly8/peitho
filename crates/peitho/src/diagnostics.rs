@@ -6,8 +6,10 @@
 //! preview error page must use [`plain_diagnostic_text`] instead, because the
 //! terminal renderer can emit ANSI escapes.
 //!
-//! The output is cargo/rustc-shaped, in the same family as lint's
-//! `warning:` / `help:` output: a red `error:` prefix, the message wrapped to
+//! The output is cargo/rustc-shaped, in the same family as the `warning:` /
+//! `note:` / `help:` labels of [`LabelStyle`] (re-exported below from
+//! `peitho::labels`, which every such label must come from): a red `error:`
+//! prefix, the message wrapped to
 //! the terminal width with a hanging indent, and a right-aligned yellow
 //! `help:` block whose body shares the message's start column. There is
 //! deliberately no wrap gutter — miette's graphical handler hardcodes the
@@ -16,6 +18,14 @@
 
 use std::fmt;
 use std::io::IsTerminal;
+
+use peitho::labels::colors_enabled_by_env;
+
+/// The `note:` / `help:` / `warning:` label styling lives in the library
+/// (`peitho::labels`) because warning sites exist on both sides of the
+/// bin/lib split; it is re-exported here so the terminal-facing modules have
+/// one import for all diagnostic rendering.
+pub(crate) use peitho::labels::LabelStyle;
 
 // The `help:` label is right-aligned under `error:` so the colons line up and
 // both bodies start in the same column (author feedback 2026-08-06); the
@@ -94,54 +104,6 @@ pub(crate) fn plain_diagnostic_text(err: &miette::Report) -> String {
 /// interpolation alone would silently drop it.
 pub(crate) fn report_help(err: &miette::Report) -> Option<String> {
     err.help().map(|help| help.to_string())
-}
-
-fn colors_enabled_by_env() -> bool {
-    let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
-    let dumb_term = std::env::var_os("TERM").is_some_and(|term| term == "dumb");
-    !no_color && !dumb_term
-}
-
-/// Colored `label: ` prefixes for lint's cargo-shaped report lines, gated
-/// the same way as [`render_diagnostic`] (stream is a TTY, `NO_COLOR` unset,
-/// `TERM` not `dumb`). Lint writes to stdout, so the caller passes its stream.
-#[derive(Clone, Copy)]
-pub(crate) struct LabelStyle {
-    colors: bool,
-}
-
-impl LabelStyle {
-    #[cfg(test)]
-    pub(crate) const PLAIN: Self = Self { colors: false };
-
-    #[cfg(test)]
-    pub(crate) const COLORED: Self = Self { colors: true };
-
-    pub(crate) fn for_stream(stream: &impl IsTerminal) -> Self {
-        Self {
-            colors: stream.is_terminal() && colors_enabled_by_env(),
-        }
-    }
-
-    pub(crate) fn warning(self) -> &'static str {
-        self.pick("warning: ", "\x1b[1;33mwarning:\x1b[0m ")
-    }
-
-    pub(crate) fn note(self) -> &'static str {
-        self.pick("note: ", "\x1b[1;32mnote:\x1b[0m ")
-    }
-
-    pub(crate) fn help(self) -> &'static str {
-        self.pick("help: ", "\x1b[1;33mhelp:\x1b[0m ")
-    }
-
-    fn pick(self, plain: &'static str, styled: &'static str) -> &'static str {
-        if self.colors {
-            styled
-        } else {
-            plain
-        }
-    }
 }
 
 pub(crate) struct TerminalStyle {

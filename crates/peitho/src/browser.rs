@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::displays::{self, PresentationLayout, SavedWindowBounds, WindowPlacement};
+use crate::labels::LabelStyle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserPlatform {
@@ -422,7 +423,8 @@ fn prepare_profile_dirs(profiles: Option<&ChromeProfiles>) -> bool {
     for profile in [&profiles.slides, &profiles.presenter] {
         if let Err(err) = std::fs::create_dir_all(profile) {
             eprintln!(
-                "warning: failed to prepare Chrome profile at {}: {err}",
+                "{}failed to prepare Chrome profile at {}: {err}",
+                LabelStyle::for_stderr().warning(),
                 profile.display()
             );
             return false;
@@ -465,13 +467,17 @@ pub fn plan_browser_with_request(
 
 pub fn open_browser_plan(plan: BrowserPlan) {
     if plan.commands.is_empty() {
-        eprintln!("warning: browser auto-open is not supported on this platform");
+        eprintln!(
+            "{}browser auto-open is not supported on this platform",
+            LabelStyle::for_stderr().warning()
+        );
         return;
     }
     for command in plan.commands {
         if let Err(err) = Command::new(&command.program).args(&command.args).spawn() {
             eprintln!(
-                "warning: failed to open browser with {}: {err}",
+                "{}failed to open browser with {}: {err}",
+                LabelStyle::for_stderr().warning(),
                 command.program.to_string_lossy()
             );
         }
