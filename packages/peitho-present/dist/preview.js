@@ -665,6 +665,7 @@ var PreviewShellController = class {
   selectedIndex = -1;
   mode = DEFAULT_PREVIEW_MODE;
   generation = 0;
+  firstLayoutDone = false;
   root;
   fetcher;
   win;
@@ -1227,6 +1228,16 @@ var PreviewShellController = class {
     this.root.dataset.peithoPreviewMode = this.mode;
     if (this.mode === "grid") this.applyGridLayout();
     else this.applySingleLayout();
+    this.firstLayoutDone = true;
+  }
+  /**
+   * `nearest` is right for stepping between neighbours (it holds the scroll still when the
+   * target is already visible), but wrong for the first layout after a load: the strip starts
+   * at scrollTop 0, so the minimal scroll pins the current slide to the bottom edge no matter
+   * where the pre-reload scroll had it. Centre it once, then hand over to `nearest`.
+   */
+  scrollIntoViewOnLayout(element) {
+    element?.scrollIntoView?.({ block: this.firstLayoutDone ? "nearest" : "center" });
   }
   applySingleLayout() {
     const viewport = this.viewport?.() ?? {
@@ -1291,7 +1302,7 @@ var PreviewShellController = class {
       slide.thumb.style.cursor = "pointer";
       this.applyHostFrame(slide.thumbHost, 0, 0, thumbScale);
     });
-    this.slides[this.currentIndex]?.thumb.scrollIntoView?.({ block: "nearest" });
+    this.scrollIntoViewOnLayout(this.slides[this.currentIndex]?.thumb);
   }
   applyGridLayout() {
     const scale = GRID_TILE_WIDTH / this.dimensions.width;
@@ -1337,7 +1348,7 @@ var PreviewShellController = class {
     this.scrollSelectedTileIntoView();
   }
   scrollSelectedTileIntoView() {
-    this.slides[this.selectedIndex]?.tile.scrollIntoView?.({ block: "nearest" });
+    this.scrollIntoViewOnLayout(this.slides[this.selectedIndex]?.tile);
   }
   applyHostFrame(host, left, top, scale) {
     host.style.position = "absolute";

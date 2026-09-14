@@ -2546,3 +2546,29 @@ it("paints the ground on the error path so a failed mount is not invisible", asy
   root.remove();
   delete document.documentElement.dataset.peithoReady;
 });
+
+it("centres the restored slide on first layout, then steps with nearest", async () => {
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 2 }));
+  const calls: Array<ScrollIntoViewOptions | boolean | undefined> = [];
+  const original = HTMLElement.prototype.scrollIntoView;
+  HTMLElement.prototype.scrollIntoView = function (options) {
+    calls.push(options);
+  };
+
+  try {
+    const bus = new EventTarget();
+    const root = document.createElement("main");
+    const shell = await mountForTest(root, bus);
+
+    // The strip starts at scrollTop 0 after a reload, so `nearest` would pin the restored
+    // slide to the bottom edge instead of where it sat before.
+    expect(calls).toEqual([{ block: "center" }]);
+    expect(shell.currentIndex).toBe(2);
+
+    calls.length = 0;
+    bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "prev" } }));
+    expect(calls).toEqual([{ block: "nearest" }]);
+  } finally {
+    HTMLElement.prototype.scrollIntoView = original;
+  }
+});
