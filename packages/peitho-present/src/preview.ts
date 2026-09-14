@@ -4,7 +4,7 @@ import type { Notes } from "../../../bindings/Notes";
 import { calculateCanvasFit, type CanvasViewport } from "./canvas";
 import { createClickNavigationGuard } from "./clickNavigationGuard";
 import { installDocumentFontScope } from "./fontscope";
-import { waitForFontsReady } from "./fontsReady";
+import { deckText, waitForFontsReady } from "./fontsReady";
 import { hasChordModifier } from "./keyboard";
 import type { NavigateTarget, SlideChangeDetail } from "./shell";
 import { initialSlideIndex, nextNonSkippedIndex } from "./skipnav";
@@ -332,13 +332,16 @@ class PreviewShellController implements PreviewShell {
       this.setCanvasRootProperties(this.dimensions, cssAspect);
       const css = await this.fetchText("peitho.css");
       this.fontScopeCleanup = installDocumentFontScope(this.doc, css);
-      await waitForFontsReady(this.doc, this.win, { log: this.log });
-      const pending = await Promise.all(
-        manifest.slides.map(async (slide) => {
-          const html = await this.fetchText(slide.src);
-          return this.createSlideView(slide, html, css);
-        })
+      // Fetch the slide HTML before waiting on fonts: the deck's own text is what selects
+      // which `unicode-range` subsets are worth fetching (see waitForFontsReady).
+      const sources = await Promise.all(
+        manifest.slides.map(async (slide) => ({ slide, html: await this.fetchText(slide.src) }))
       );
+      await waitForFontsReady(this.doc, this.win, {
+        log: this.log,
+        text: deckText(sources.map((source) => source.html))
+      });
+      const pending = sources.map(({ slide, html }) => this.createSlideView(slide, html, css));
       this.manifest = manifest;
       this.doc.title = manifest.title;
       this.root.replaceChildren();
@@ -405,7 +408,7 @@ class PreviewShellController implements PreviewShell {
   private async doFlush(key: string | null, text: string, keepalive: boolean): Promise<boolean> {
     if (key === null) return true;
     if (!this.isDirty(key, text)) {
-      this.notesStatus.textContent = "";
+      this.setNotesStatus("");
       return true;
     }
 
@@ -421,7 +424,7 @@ class PreviewShellController implements PreviewShell {
       if (response.ok) {
         if (text === "") delete this.notes.notes[key];
         else this.notes.notes[key] = text;
-        this.notesStatus.textContent = "";
+        this.setNotesStatus("");
         return true;
       }
 
@@ -433,9 +436,9 @@ class PreviewShellController implements PreviewShell {
       } catch {
         // A non-JSON response is already the server's displayable error text.
       }
-      this.notesStatus.textContent = message;
+      this.setNotesStatus(message);
     } catch (error) {
-      this.notesStatus.textContent = error instanceof Error ? error.message : String(error);
+      this.setNotesStatus(error instanceof Error ? error.message : String(error));
     }
     return false;
   }
@@ -630,6 +633,7 @@ class PreviewShellController implements PreviewShell {
     positionRow.appendChild(positionText);
     const status = this.doc.createElement("span");
     status.dataset.peithoPreview = "status";
+    status.setAttribute("role", "alert");
     status.style.marginLeft = "auto";
     status.style.color = "#f87171";
     status.style.whiteSpace = "pre-wrap";
@@ -652,6 +656,24 @@ class PreviewShellController implements PreviewShell {
     textarea.style.outlineOffset = "4px";
     panel.appendChild(textarea);
     return panel;
+  }
+
+  /**
+   * The only writer of the notes status. A save failure is the one thing in preview the
+   * author must not miss (the server may be gone), so a non-empty status turns the whole
+   * notes panel into the alert: red chip plus a red panel border.
+   */
+  private setNotesStatus(message: string): void {
+    this.notesStatus.textContent = message;
+    const failed = message !== "";
+    this.notesStatus.style.background = failed ? "#7f1d1d" : "";
+    this.notesStatus.style.color = failed ? "#fee2e2" : "#f87171";
+    this.notesStatus.style.padding = failed ? "2px 10px" : "";
+    this.notesStatus.style.borderRadius = failed ? "999px" : "";
+    this.notesPanel.style.borderTop = failed
+      ? "3px solid #ef4444"
+      : "1px solid rgba(255,255,255,0.16)";
+    this.notesPanel.style.background = failed ? "#241416" : "#15181e";
   }
 
   private renderNotes(): void {

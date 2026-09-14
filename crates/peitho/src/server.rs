@@ -366,17 +366,28 @@ pub(crate) fn content_type(path: &Path) -> &'static str {
 /// long a swapped face can be stale, and the reload is a normal navigation, so the cached
 /// entry is used rather than force-revalidated.
 const FONT_ASSET_DIRECTORIES: [&str; 3] = ["fonts", "theme-fonts", "katex-fonts"];
+const FONT_FILE_EXTENSIONS: [&str; 4] = ["woff2", "woff", "ttf", "otf"];
 
+/// Cache a font file anywhere under a font directory, at any depth.
+///
+/// Depth is not a property of a font. `fonts:` copies a directory verbatim, so how deeply a
+/// face sits is decided by whatever the author vendored: fontsource ships subsetted families
+/// as `fonts/<family>/files/<subset>.woff2`, three levels down, while a hand-placed face sits
+/// directly in `theme-fonts/`. Matching only the flat shape left exactly the decks that need
+/// caching most — a CJK deck refetching megabytes of `unicode-range` subsets on every
+/// rebuild reload — without the header, and the refetch is what makes text visibly settle.
+///
+/// The extension check keeps the directory's non-font neighbours (`index.css`, licenses)
+/// uncached, so the watch loop still serves fresh CSS.
 fn cache_control(request_url: &str) -> Option<&'static str> {
     let path = request_url.split(['?', '#']).next().unwrap_or_default();
     let mut segments = path.split('/').filter(|segment| !segment.is_empty());
-    let directory = segments.next()?;
-    // Only a file directly inside a font directory qualifies; nothing deeper, nothing else.
-    if !FONT_ASSET_DIRECTORIES.contains(&directory) {
+    if !FONT_ASSET_DIRECTORIES.contains(&segments.next()?) {
         return None;
     }
-    let file = segments.next()?;
-    if segments.next().is_some() || file.is_empty() {
+    let file = segments.next_back()?;
+    let (stem, extension) = file.rsplit_once('.')?;
+    if stem.is_empty() || !FONT_FILE_EXTENSIONS.contains(&extension) {
         return None;
     }
     Some("public, max-age=300")
@@ -1626,18 +1637,26 @@ mod tests {
     }
 
     #[test]
-    fn caches_only_font_directory_files() {
+    fn caches_font_files_at_any_depth() {
         // Fonts are the one asset a rebuild does not change, so only these may be cached.
         for url in [
             "/fonts/Custom.woff2",
             "/theme-fonts/Inter-Regular.woff2",
             "/katex-fonts/KaTeX_Main-Regular.woff2",
             "/theme-fonts/Inter-Regular.woff2?v=2",
+            "/fonts/Custom.woff",
+            "/fonts/Custom.ttf",
+            "/fonts/Custom.otf",
+            // How deeply a face sits is the author's vendoring, not a property of the font:
+            // fontsource ships subsetted CJK families exactly like this.
+            "/fonts/noto-sans-jp/files/noto-sans-jp-34-wght-normal.woff2",
+            "/fonts/nested/Custom.woff2",
         ] {
             assert_eq!(cache_control(url), Some("public, max-age=300"), "{url}");
         }
 
-        // Everything the watch loop must re-read after a rebuild stays uncached.
+        // Everything the watch loop must re-read after a rebuild stays uncached,
+        // including a font directory's own non-font neighbours.
         for url in [
             "/manifest.json",
             "/notes.json",
@@ -1648,7 +1667,9 @@ mod tests {
             "/",
             "/fonts",
             "/fonts/",
-            "/fonts/nested/Custom.woff2",
+            "/fonts/noto-sans-jp/index.css",
+            "/fonts/LICENSE",
+            "/fonts/.woff2",
             "/img/theme-fonts/Inter-Regular.woff2",
         ] {
             assert_eq!(cache_control(url), None, "{url}");

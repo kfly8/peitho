@@ -902,15 +902,24 @@ function isCssWhitespace(char) {
 }
 
 // src/fontsReady.ts
+function deckText(htmlSources) {
+  const characters = /* @__PURE__ */ new Set();
+  for (const html of htmlSources) {
+    for (const char of html.replace(/<[^>]*>/g, " ")) {
+      if (char > " ") characters.add(char);
+    }
+  }
+  return [...characters].join("");
+}
 var MAX_FONT_READY_PASSES = 5;
 async function waitForFontsReady(doc, win, options) {
   const fonts = doc.fonts;
   if (fonts == null) return;
   const timeoutMs = options?.timeoutMs ?? 3e3;
   const deadline = Date.now() + timeoutMs;
-  const kicked = /* @__PURE__ */ new WeakSet();
+  const kicked = /* @__PURE__ */ new Set();
   for (let pass = 0; pass < MAX_FONT_READY_PASSES; pass += 1) {
-    const hasNewFace = kickVisibleFontFaces(fonts, kicked);
+    const hasNewFace = kickVisibleFontFaces(fonts, kicked, options?.text);
     if (!hasNewFace && pass > 0) return;
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0 || await raceReadyWithTimeout(fonts, win, remainingMs)) {
@@ -920,18 +929,20 @@ async function waitForFontsReady(doc, win, options) {
     }
   }
 }
-function kickVisibleFontFaces(fonts, kicked) {
-  let hasNewFace = false;
+function kickVisibleFontFaces(fonts, kicked, text) {
+  if (text === void 0 || text === "") return false;
+  let hasNewFamily = false;
   fonts.forEach((face) => {
-    if (kicked.has(face)) return;
-    kicked.add(face);
-    hasNewFace = true;
+    const key = `${face.family}\0${face.weight}\0${face.style}`;
+    if (kicked.has(key)) return;
+    kicked.add(key);
+    hasNewFamily = true;
     try {
-      face.load().catch(() => void 0);
+      fonts.load(`${face.style} ${face.weight} 1em ${face.family}`, text).catch(() => void 0);
     } catch {
     }
   });
-  return hasNewFace;
+  return hasNewFamily;
 }
 async function raceReadyWithTimeout(fonts, win, ms) {
   let timeoutId;
@@ -1449,13 +1460,18 @@ var PresentShellController = class {
       this.setCanvasRootProperties(dimensions, cssAspect);
       const css = await this.fetchText("peitho.css");
       this.fontScopeCleanup = installDocumentFontScope(this.doc, css);
-      await waitForFontsReady(this.doc, this.win, { log: this.log });
-      const pending = [];
+      const sources = [];
       for (const slide of manifest.slides) {
-        const html = await this.fetchText(slide.src);
-        const host = this.createSlideHost(slide, html, css, dimensions);
-        pending.push({ meta: slide, host });
+        sources.push({ slide, html: await this.fetchText(slide.src) });
       }
+      await waitForFontsReady(this.doc, this.win, {
+        log: this.log,
+        text: deckText(sources.map((source) => source.html))
+      });
+      const pending = sources.map(({ slide, html }) => ({
+        meta: slide,
+        host: this.createSlideHost(slide, html, css, dimensions)
+      }));
       this.manifest = manifest;
       for (const view of pending) {
         this.root.appendChild(view.host);

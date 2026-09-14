@@ -222,15 +222,24 @@ function isCssWhitespace(char) {
 }
 
 // src/fontsReady.ts
+function deckText(htmlSources) {
+  const characters = /* @__PURE__ */ new Set();
+  for (const html of htmlSources) {
+    for (const char of html.replace(/<[^>]*>/g, " ")) {
+      if (char > " ") characters.add(char);
+    }
+  }
+  return [...characters].join("");
+}
 var MAX_FONT_READY_PASSES = 5;
 async function waitForFontsReady(doc, win, options) {
   const fonts = doc.fonts;
   if (fonts == null) return;
   const timeoutMs = options?.timeoutMs ?? 3e3;
   const deadline = Date.now() + timeoutMs;
-  const kicked = /* @__PURE__ */ new WeakSet();
+  const kicked = /* @__PURE__ */ new Set();
   for (let pass = 0; pass < MAX_FONT_READY_PASSES; pass += 1) {
-    const hasNewFace = kickVisibleFontFaces(fonts, kicked);
+    const hasNewFace = kickVisibleFontFaces(fonts, kicked, options?.text);
     if (!hasNewFace && pass > 0) return;
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0 || await raceReadyWithTimeout(fonts, win, remainingMs)) {
@@ -240,18 +249,20 @@ async function waitForFontsReady(doc, win, options) {
     }
   }
 }
-function kickVisibleFontFaces(fonts, kicked) {
-  let hasNewFace = false;
+function kickVisibleFontFaces(fonts, kicked, text) {
+  if (text === void 0 || text === "") return false;
+  let hasNewFamily = false;
   fonts.forEach((face) => {
-    if (kicked.has(face)) return;
-    kicked.add(face);
-    hasNewFace = true;
+    const key = `${face.family}\0${face.weight}\0${face.style}`;
+    if (kicked.has(key)) return;
+    kicked.add(key);
+    hasNewFamily = true;
     try {
-      face.load().catch(() => void 0);
+      fonts.load(`${face.style} ${face.weight} 1em ${face.family}`, text).catch(() => void 0);
     } catch {
     }
   });
-  return hasNewFace;
+  return hasNewFamily;
 }
 async function raceReadyWithTimeout(fonts, win, ms) {
   let timeoutId;
@@ -769,13 +780,14 @@ var PreviewShellController = class {
       this.setCanvasRootProperties(this.dimensions, cssAspect);
       const css = await this.fetchText("peitho.css");
       this.fontScopeCleanup = installDocumentFontScope(this.doc, css);
-      await waitForFontsReady(this.doc, this.win, { log: this.log });
-      const pending = await Promise.all(
-        manifest.slides.map(async (slide) => {
-          const html = await this.fetchText(slide.src);
-          return this.createSlideView(slide, html, css);
-        })
+      const sources = await Promise.all(
+        manifest.slides.map(async (slide) => ({ slide, html: await this.fetchText(slide.src) }))
       );
+      await waitForFontsReady(this.doc, this.win, {
+        log: this.log,
+        text: deckText(sources.map((source) => source.html))
+      });
+      const pending = sources.map(({ slide, html }) => this.createSlideView(slide, html, css));
       this.manifest = manifest;
       this.doc.title = manifest.title;
       this.root.replaceChildren();
@@ -832,7 +844,7 @@ var PreviewShellController = class {
   async doFlush(key, text, keepalive) {
     if (key === null) return true;
     if (!this.isDirty(key, text)) {
-      this.notesStatus.textContent = "";
+      this.setNotesStatus("");
       return true;
     }
     try {
@@ -847,7 +859,7 @@ var PreviewShellController = class {
       if (response.ok) {
         if (text === "") delete this.notes.notes[key];
         else this.notes.notes[key] = text;
-        this.notesStatus.textContent = "";
+        this.setNotesStatus("");
         return true;
       }
       const body = await response.text();
@@ -857,9 +869,9 @@ var PreviewShellController = class {
         if (typeof error === "string") message = error;
       } catch {
       }
-      this.notesStatus.textContent = message;
+      this.setNotesStatus(message);
     } catch (error) {
-      this.notesStatus.textContent = error instanceof Error ? error.message : String(error);
+      this.setNotesStatus(error instanceof Error ? error.message : String(error));
     }
     return false;
   }
@@ -1035,6 +1047,7 @@ var PreviewShellController = class {
     positionRow.appendChild(positionText);
     const status = this.doc.createElement("span");
     status.dataset.peithoPreview = "status";
+    status.setAttribute("role", "alert");
     status.style.marginLeft = "auto";
     status.style.color = "#f87171";
     status.style.whiteSpace = "pre-wrap";
@@ -1057,6 +1070,21 @@ var PreviewShellController = class {
     textarea.style.outlineOffset = "4px";
     panel.appendChild(textarea);
     return panel;
+  }
+  /**
+   * The only writer of the notes status. A save failure is the one thing in preview the
+   * author must not miss (the server may be gone), so a non-empty status turns the whole
+   * notes panel into the alert: red chip plus a red panel border.
+   */
+  setNotesStatus(message) {
+    this.notesStatus.textContent = message;
+    const failed = message !== "";
+    this.notesStatus.style.background = failed ? "#7f1d1d" : "";
+    this.notesStatus.style.color = failed ? "#fee2e2" : "#f87171";
+    this.notesStatus.style.padding = failed ? "2px 10px" : "";
+    this.notesStatus.style.borderRadius = failed ? "999px" : "";
+    this.notesPanel.style.borderTop = failed ? "3px solid #ef4444" : "1px solid rgba(255,255,255,0.16)";
+    this.notesPanel.style.background = failed ? "#241416" : "#15181e";
   }
   renderNotes() {
     const slide = this.slides[this.currentIndex];
