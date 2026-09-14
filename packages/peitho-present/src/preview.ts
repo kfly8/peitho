@@ -4,7 +4,7 @@ import type { Notes } from "../../../bindings/Notes";
 import { calculateCanvasFit, type CanvasViewport } from "./canvas";
 import { createClickNavigationGuard } from "./clickNavigationGuard";
 import { installDocumentFontScope } from "./fontscope";
-import { waitForFontsReady } from "./fontsReady";
+import { deckText, waitForFontsReady } from "./fontsReady";
 import { hasChordModifier } from "./keyboard";
 import type { NavigateTarget, SlideChangeDetail } from "./shell";
 import { initialSlideIndex, nextNonSkippedIndex } from "./skipnav";
@@ -332,13 +332,16 @@ class PreviewShellController implements PreviewShell {
       this.setCanvasRootProperties(this.dimensions, cssAspect);
       const css = await this.fetchText("peitho.css");
       this.fontScopeCleanup = installDocumentFontScope(this.doc, css);
-      await waitForFontsReady(this.doc, this.win, { log: this.log });
-      const pending = await Promise.all(
-        manifest.slides.map(async (slide) => {
-          const html = await this.fetchText(slide.src);
-          return this.createSlideView(slide, html, css);
-        })
+      // Fetch the slide HTML before waiting on fonts: the deck's own text is what selects
+      // which `unicode-range` subsets are worth fetching (see waitForFontsReady).
+      const sources = await Promise.all(
+        manifest.slides.map(async (slide) => ({ slide, html: await this.fetchText(slide.src) }))
       );
+      await waitForFontsReady(this.doc, this.win, {
+        log: this.log,
+        text: deckText(sources.map((source) => source.html))
+      });
+      const pending = sources.map(({ slide, html }) => this.createSlideView(slide, html, css));
       this.manifest = manifest;
       this.doc.title = manifest.title;
       this.root.replaceChildren();
