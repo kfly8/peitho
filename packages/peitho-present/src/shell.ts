@@ -286,12 +286,40 @@ const CSS_NAMED_COLORS: Record<string, string> = {
   yellowgreen: "#9acd32"
 };
 
+// Fired from a slide's Shadow DOM host once it connects, so a layout's own mounting script
+// can discover a root to mount into — it has no other way to reach inside a shadow tree,
+// since `document.querySelectorAll`/`MutationObserver` never cross a shadow boundary.
+export const SHADOW_MOUNTED_EVENT = "peitho:shadow-mounted";
+export type ShadowMountedDetail = { root: ShadowRoot };
+
+const SHADOW_ROOTS_PROPERTY = "__peithoShadowRoots";
+
 export type SlideView = {
   meta: ManifestSlide;
   host: HTMLElement;
 };
 
 type ResolvedNavigateTarget = { index: number; step: number };
+
+function shadowRootsRegistry(win: Window): ShadowRoot[] {
+  const withRegistry = win as unknown as Record<string, ShadowRoot[] | undefined>;
+  return (withRegistry[SHADOW_ROOTS_PROPERTY] ??= []);
+}
+
+// `load()` connects every slide's host in one synchronous burst, before any of their
+// `<script type="module">` tags — module loading is never synchronous — could have loaded
+// and started listening. A plain dispatch would miss every initial mount; the registry above
+// lets a script that loads later drain what it missed.
+function announceShadowMounted(host: HTMLElement, root: ShadowRoot, win: Window): void {
+  shadowRootsRegistry(win).push(root);
+  host.dispatchEvent(
+    new CustomEvent<ShadowMountedDetail>(SHADOW_MOUNTED_EVENT, {
+      bubbles: true,
+      composed: true,
+      detail: { root }
+    })
+  );
+}
 
 export async function mountPresentShell(options: ShellOptions): Promise<PresentShell> {
   const shell = new PresentShellController(options);
@@ -632,6 +660,7 @@ class PresentShellController implements PresentShell {
       for (const view of pending) {
         this.root.appendChild(view.host);
         this.slides.push(view);
+        if (view.host.shadowRoot) announceShadowMounted(view.host, view.host.shadowRoot, this.win);
       }
       this.show(initialSlideIndex(pending.map((view) => view.meta)) ?? 0, 0);
       this.mountPointerOverlay();
