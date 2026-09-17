@@ -1601,6 +1601,24 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
       return 1;
     }
 
+    // Mirrors packages/peitho-present/src/scripts.ts — kept in sync by
+    // hand, since a plain <script> here can't import a bundled TS module.
+    const CLASSIC_JAVASCRIPT_TYPES = new Set(['', 'text/javascript', 'application/javascript']);
+    function needsScopeWrap(script) {
+      if (script.hasAttribute('src')) return false;
+      return CLASSIC_JAVASCRIPT_TYPES.has((script.getAttribute('type') || '').trim().toLowerCase());
+    }
+    function executeInlineScripts(root) {
+      for (const oldScript of root.querySelectorAll('script')) {
+        const newScript = document.createElement('script');
+        for (const attribute of oldScript.attributes) newScript.setAttribute(attribute.name, attribute.value);
+        newScript.textContent = needsScopeWrap(oldScript)
+          ? `(function () {\n${oldScript.textContent}\n})();`
+          : oldScript.textContent;
+        oldScript.replaceWith(newScript);
+      }
+    }
+
     function showSlide(index) {
       if (slides.length === 0) {
         document.getElementById('peitho-canvas').replaceChildren();
@@ -1611,6 +1629,7 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
       writeSlideIndexToUrl(currentIndex + 1);
       const canvas = document.getElementById('peitho-canvas');
       canvas.innerHTML = slides[next].html;
+      executeInlineScripts(canvas);
     }
 
     function writeSlideIndexToUrl(oneBased) {
@@ -4764,6 +4783,33 @@ Paragraph after heading.
         assert!(!html.contains("shell.js"));
         assert!(!html.contains("installPresentationControls"));
         assert!(!html.contains("data-slide-key="));
+    }
+
+    #[test]
+    fn distribution_index_re_executes_a_slides_own_script_on_every_navigation() {
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+
+        assert!(html.contains("function executeInlineScripts(root)"));
+        assert!(html.contains("root.querySelectorAll('script')"));
+        let inner_html_index = html.find("canvas.innerHTML = slides[next].html;").unwrap();
+        let execute_call_index = html.find("executeInlineScripts(canvas);").unwrap();
+        assert!(inner_html_index < execute_call_index);
+    }
+
+    #[test]
+    fn distribution_index_wraps_a_classic_inline_script_so_repeat_visits_do_not_redeclare() {
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+
+        assert!(html.contains("function needsScopeWrap(script)"));
+        assert!(html.contains("(function () {\\n${oldScript.textContent}\\n})();"));
+    }
+
+    #[test]
+    fn distribution_index_leaves_a_module_scripts_source_unwrapped() {
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+
+        assert!(html.contains("if (script.hasAttribute('src')) return false;"));
+        assert!(html.contains("CLASSIC_JAVASCRIPT_TYPES.has"));
     }
 
     #[test]
