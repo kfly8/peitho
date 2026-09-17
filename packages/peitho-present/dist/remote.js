@@ -530,6 +530,22 @@ var CSS_NAMED_COLORS = {
   yellow: "#ffff00",
   yellowgreen: "#9acd32"
 };
+var SHADOW_MOUNTED_EVENT = "peitho:shadow-mounted";
+var SHADOW_ROOTS_PROPERTY = "__peithoShadowRoots";
+function shadowRootsRegistry(win) {
+  const withRegistry = win;
+  return withRegistry[SHADOW_ROOTS_PROPERTY] ??= [];
+}
+function announceShadowMounted(host, root, win) {
+  shadowRootsRegistry(win).push(root);
+  host.dispatchEvent(
+    new CustomEvent(SHADOW_MOUNTED_EVENT, {
+      bubbles: true,
+      composed: true,
+      detail: { root }
+    })
+  );
+}
 async function mountPresentShell(options) {
   const shell = new PresentShellController(options);
   await shell.load();
@@ -840,6 +856,7 @@ var PresentShellController = class {
       for (const view of pending) {
         this.root.appendChild(view.host);
         this.slides.push(view);
+        if (view.host.shadowRoot) announceShadowMounted(view.host, view.host.shadowRoot, this.win);
       }
       this.show(initialSlideIndex(pending.map((view) => view.meta)) ?? 0, 0);
       this.mountPointerOverlay();
