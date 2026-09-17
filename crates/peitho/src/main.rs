@@ -46,6 +46,7 @@ struct BuildArtifacts {
     manifest_json: String,
     image_assets: Vec<peitho_core::ResolvedImageAsset>,
     fonts_source: Option<PathBuf>,
+    deck_dir: PathBuf,
 }
 
 pub(crate) struct LoadedDeckSource {
@@ -1997,6 +1998,7 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         manifest_json,
         image_assets,
         fonts_source: assets.fonts.path().map(Path::to_path_buf),
+        deck_dir: asset_resolution::deck_parent(input).to_path_buf(),
     })
 }
 
@@ -2227,7 +2229,7 @@ fn emit_pdf_workspace(workspace: &Path, artifacts: &BuildArtifacts) -> miette::R
 fn write_shared_assets(dir: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
     fs::create_dir_all(dir).into_diagnostic()?;
     fs::write(dir.join("peitho.css"), artifacts.rendered.css()).into_diagnostic()?;
-    write_image_assets(dir, &artifacts.image_assets)?;
+    write_image_assets(dir, &artifacts.image_assets, &artifacts.deck_dir)?;
     write_fonts_assets(dir, artifacts.fonts_source.as_deref())?;
     write_theme_fonts_assets(dir)?;
     write_katex_fonts_assets(dir, artifacts.rendered.math_assets())
@@ -4782,6 +4784,7 @@ fn write_slide_fragments(
 fn write_image_assets(
     out: &Path,
     image_assets: &[peitho_core::ResolvedImageAsset],
+    deck_dir: &Path,
 ) -> miette::Result<()> {
     let assets_dir = out.join("assets");
     if assets_dir.exists() {
@@ -4790,6 +4793,28 @@ fn write_image_assets(
     fs::create_dir_all(&assets_dir).into_diagnostic()?;
     for asset in image_assets {
         fs::copy(&asset.source_abs, out.join(asset.dist_rel.as_str())).into_diagnostic()?;
+    }
+    copy_deck_assets_not_already_resolved(&deck_dir.join("assets"), &assets_dir)
+}
+
+fn copy_deck_assets_not_already_resolved(source: &Path, destination: &Path) -> miette::Result<()> {
+    let Ok(entries) = fs::read_dir(source) else {
+        return Ok(());
+    };
+    let mut entries = entries
+        .collect::<std::io::Result<Vec<_>>>()
+        .into_diagnostic()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let file_type = entry.file_type().into_diagnostic()?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let destination_path = destination.join(entry.file_name());
+        if destination_path.exists() {
+            continue;
+        }
+        fs::copy(entry.path(), destination_path).into_diagnostic()?;
     }
     Ok(())
 }
@@ -5995,6 +6020,59 @@ contexts:
             .unwrap()
             .contains(".slot-title { font-weight: 700; }"));
         assert_theme_fonts_written(&out);
+    }
+
+    #[test]
+    fn write_shared_assets_copies_a_layout_authors_own_deck_asset_never_referenced_by_markdown() {
+        let fixture = WatchFixture::new("# Intro\n\nBody\n");
+        fs::create_dir_all(fixture._dir.path().join("assets")).unwrap();
+        fs::write(fixture._dir.path().join("assets/hero.mp4"), b"fake video bytes").unwrap();
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let out = fixture._dir.path().join("dist");
+
+        write_shared_assets(&out, &artifacts).unwrap();
+
+        assert_eq!(
+            fs::read(out.join("assets/hero.mp4")).unwrap(),
+            b"fake video bytes"
+        );
+    }
+
+    #[test]
+    fn write_image_assets_adversarial_a_name_collision_keeps_the_markdown_resolved_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolved_source = dir.path().join("resolved.png");
+        fs::write(&resolved_source, b"resolved bytes").unwrap();
+        fs::create_dir_all(dir.path().join("assets")).unwrap();
+        fs::write(dir.path().join("assets/0123456789abcdef-photo.png"), b"decoy").unwrap();
+        let image_assets = vec![peitho_core::ResolvedImageAsset {
+            source_abs: resolved_source,
+            dist_rel: peitho_core::ResolvedImagePath::from_hashed_asset(
+                "0123456789abcdef",
+                "photo.png",
+            )
+            .unwrap(),
+        }];
+        let out = dir.path().join("dist");
+
+        write_image_assets(&out, &image_assets, dir.path()).unwrap();
+
+        assert_eq!(
+            fs::read(out.join("assets/0123456789abcdef-photo.png")).unwrap(),
+            b"resolved bytes"
+        );
+    }
+
+    #[test]
+    fn write_shared_assets_adversarial_no_deck_assets_directory_is_a_no_op() {
+        let fixture = WatchFixture::new("# Intro\n\nBody\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let out = fixture._dir.path().join("dist");
+
+        write_shared_assets(&out, &artifacts).unwrap();
+
+        assert!(out.join("assets").exists());
+        assert_eq!(fs::read_dir(out.join("assets")).unwrap().count(), 0);
     }
 
     #[test]
