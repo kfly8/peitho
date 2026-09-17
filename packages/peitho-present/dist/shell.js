@@ -958,6 +958,25 @@ async function raceReadyWithTimeout(fonts, win, ms) {
   return result === "timeout";
 }
 
+// src/scripts.ts
+var CLASSIC_JAVASCRIPT_TYPES = /* @__PURE__ */ new Set(["", "text/javascript", "application/javascript"]);
+function needsScopeWrap(script) {
+  if (script.hasAttribute("src")) return false;
+  return CLASSIC_JAVASCRIPT_TYPES.has((script.getAttribute("type") ?? "").trim().toLowerCase());
+}
+function executeInlineScripts(root, doc) {
+  for (const oldScript of Array.from(root.querySelectorAll("script"))) {
+    const newScript = doc.createElement("script");
+    for (const attribute of Array.from(oldScript.attributes)) {
+      newScript.setAttribute(attribute.name, attribute.value);
+    }
+    newScript.textContent = needsScopeWrap(oldScript) ? `(function () {
+${oldScript.textContent ?? ""}
+})();` : oldScript.textContent;
+    oldScript.replaceWith(newScript);
+  }
+}
+
 // src/skipnav.ts
 function nextNonSkippedIndex(slides, from, direction) {
   let index = from + direction;
@@ -1582,7 +1601,9 @@ var PresentShellController = class {
     shadow.appendChild(revealStyle);
     const template = this.doc.createElement("template");
     template.innerHTML = html;
-    shadow.appendChild(template.content.cloneNode(true));
+    const fragment = template.content.cloneNode(true);
+    executeInlineScripts(fragment, this.doc);
+    shadow.appendChild(fragment);
     return host;
   }
   mountPointerOverlay() {
